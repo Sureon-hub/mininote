@@ -1,0 +1,893 @@
+'use strict';
+// Editor screen: viewport, input (mouse / pen / touch gestures), tool switching, layer ops, save & page navigation.
+(() => {
+  const U = App.util, h = U.h, T = App.tools, H = App.History;
+
+  const TOOLS = [
+    ['brush', 'brush', '브러시 (B)'],
+    ['eraser', 'eraser', '지우개 (E)'],
+    ['fill', 'fill', '채우기 (G)'],
+    ['select', 'select', '사각 선택 (M)'],
+    ['lasso', 'lasso', '올가미 선택 (L)'],
+    ['transform', 'transform', '변형·이동 (V)'],
+    ['picker', 'picker', '스포이트 (I / Alt)'],
+    ['hand', 'hand', '손 도구 (H / Space)'],
+  ];
+  const KEYS = { b: 'brush', e: 'eraser', g: 'fill', m: 'select', l: 'lasso', v: 'transform', i: 'picker', h: 'hand' };
+  const sizeToPos = s => Math.pow((s - 1) / 399, 1 / 2.2);
+  const posToSize = p => Math.max(1, Math.round(1 + 399 * Math.pow(p, 2.2)));
+
+  class Editor {
+    init() {
+      this.root = U.$('#editor');
+      this.stage = U.$('#e-stage');
+      this.canvas = U.$('#e-canvas');
+      this.vctx = this.canvas.getContext('2d');
+      this.doc = null; this.ctx = null;
+      this.z = 1; this.fitZ = 1; this.ox = 0; this.oy = 0;
+      this.dpr = devicePixelRatio || 1;
+      this.history = new H(e => this.onHistory(e));
+      this.tools = {
+        brush: new T.BrushTool(this, false), eraser: new T.BrushTool(this, true), fill: new T.FillTool(this),
+        select: new T.SelectTool(this, 'rect'), lasso: new T.SelectTool(this, 'lasso'),
+        transform: new T.TransformTool(this), picker: new T.PickerTool(this), hand: new T.HandTool(this),
+      };
+      this.toolName = 'brush';
+      this.color = App.settings.color;
+      this.pointers = new Map();
+      this.action = null; this.gesture = null;
+      this.penSeen = false;
+      this.ants = 0;
+      this.list = []; this.idx = -1;
+      this.pBrush = new App.ui.BrushPanel(this);
+      this.pColor = new App.ui.ColorPanel(this);
+      this.pLayers = new App.ui.LayersPanel(this);
+      this.buildUI();
+      this.bindInput();
+      new ResizeObserver(() => this.resize()).observe(this.stage);
+      matchMedia('(min-width: 900px)').addEventListener('change', () => this.layoutDock());
+      setInterval(() => { if (this.visible && this.doc?.selection) { this.ants = (this.ants + 1) % 8; this.requestRender(); } }, 140);
+      this.refreshLayersSoon = U.debounce(() => this.pLayers.render(), 120);
+    }
+    get visible() { return !this.root.hidden; }
+    isWide() { return matchMedia('(min-width: 900px)').matches; }
+
+    // ================= UI =================
+    buildUI() {
+      const bar = U.$('#e-bar');
+      this.nameEl = h('div', { class: 'e-title' });
+      this.btnUndo = U.iconBtn('undo', '실행 취소 (Ctrl+Z · 두 손가락 탭)', () => this.undo());
+      this.btnRedo = U.iconBtn('redo', '다시 실행 (Ctrl+Y · 세 손가락 탭)', () => this.redo());
+      this.btnSave = U.iconBtn('save', '저장 (Ctrl+S) — 원본 이미지 + 편집파일', () => this.save(), 'accent');
+      this.btnPrev = U.iconBtn('left', '이전 노트 (←)', () => this.navigate(-1));
+      this.btnNext = U.iconBtn('right', '다음 노트 (→)', () => this.navigate(1));
+      bar.replaceChildren(
+        U.iconBtn('back', '갤러리로', () => this.close()),
+        this.nameEl, h('div', { class: 'grow' }),
+        this.btnPrev, this.btnNext, h('span', { class: 'sep' }),
+        this.btnUndo, this.btnRedo, this.btnSave,
+        U.iconBtn('layers', '레이어', () => this.toggleTab('layers')),
+        U.iconBtn('more', '더보기', e => this.moreMenu(e.currentTarget)));
+
+      // tool rail
+      const rail = U.$('#e-tools');
+      this.toolBtns = {};
+      for (const [name, icon, title] of TOOLS) {
+        const b = U.iconBtn(icon, title, () => {
+          if (this.toolName === name && (name === 'brush' || name === 'eraser')) this.toggleTab('brush');
+          else this.setTool(name);
+        }, name === 'hand' ? 'tool wide-only' : 'tool'); // phones pan with two fingers
+        this.toolBtns[name] = b;
+        rail.append(b);
+      }
+      this.swatch = h('button', { class: 'swatch-btn', title: '색상', onclick: () => this.toggleTab('color') });
+      rail.append(h('span', { class: 'rail-sep' }), this.swatch,
+        U.iconBtn('edit', '브러시 설정', () => this.toggleTab('brush'), 'tool narrow-only'));
+
+      // dock
+      this.dock = U.$('#e-dock');
+      this.dockBody = U.$('#e-dock-body');
+      this.dockTabs = U.$$('#e-dock .dock-tabs button');
+      for (const b of this.dockTabs) b.addEventListener('click', () => this.showTab(b.dataset.tab));
+      U.$('#e-dock-close').addEventListener('click', () => { if (this.isWide()) App.settings.dockOpen = false; else this.sheetOpen = false; App.saveSettings(); this.layoutDock(); });
+
+      // quick sliders
+      const q = U.$('#e-quick');
+      this.qSize = App.ui.vslider({ label: '브러시 크기', get: () => this.preset().size, set: v => { this.preset().size = v; this.onBrushChanged(true); }, toPos: sizeToPos, fromPos: posToSize, fmt: v => v + '' });
+      this.qOpacity = App.ui.vslider({ label: '불투명도', get: () => this.preset().opacity, set: v => { this.preset().opacity = v; this.onBrushChanged(true); }, toPos: v => v, fromPos: p => Math.max(0.02, Math.round(p * 100) / 100), fmt: v => Math.round(v * 100) + '%' });
+      q.append(this.qSize, this.qOpacity);
+
+      this.opts = U.$('#e-opts');
+      this.ctxbar = U.$('#e-ctxbar');
+      this.loadingEl = U.$('#e-loading');
+      this.setTool('brush');
+      this.showTab(App.settings.dockTab || 'layers', false);
+      this.layoutDock();
+      this.updateSwatch();
+    }
+    preset() { const S = App.settings; return this.toolName === 'eraser' ? S.brushes.eraser : S.brushes[S.currentBrush]; }
+
+    showTab(tab, open = true) {
+      App.settings.dockTab = tab;
+      for (const b of this.dockTabs) b.classList.toggle('on', b.dataset.tab === tab);
+      const p = { brush: this.pBrush, color: this.pColor, layers: this.pLayers }[tab];
+      this.dockBody.replaceChildren(p.el);
+      if (tab === 'brush') this.pBrush.render();
+      if (tab === 'color') this.pColor.sync();
+      if (tab === 'layers') this.pLayers.render();
+      if (open) { if (this.isWide()) App.settings.dockOpen = true; else this.sheetOpen = true; }
+      App.saveSettings();
+      this.layoutDock();
+    }
+    toggleTab(tab) {
+      const open = this.isWide() ? App.settings.dockOpen : this.sheetOpen;
+      if (open && App.settings.dockTab === tab) {
+        if (this.isWide()) App.settings.dockOpen = false; else this.sheetOpen = false;
+        App.saveSettings();
+        this.layoutDock();
+      } else this.showTab(tab);
+    }
+    layoutDock() {
+      const open = this.isWide() ? App.settings.dockOpen : this.sheetOpen;
+      this.root.classList.toggle('dock-open', !!open);
+    }
+
+    setTool(name) {
+      if (this.toolName === 'transform' && name !== 'transform') this.tools.transform.commit();
+      const prev = this.toolName;
+      this.toolName = name;
+      for (const [n, b] of Object.entries(this.toolBtns)) b.classList.toggle('on', n === name);
+      this.canvas.style.cursor = this.tools[name].cursor;
+      U.$('#e-quick').hidden = !(name === 'brush' || name === 'eraser');
+      this.qSize.sync(); this.qOpacity.sync();
+      if (App.settings.dockTab === 'brush') this.pBrush.render();
+      this.renderOpts();
+      if (name === 'transform' && prev !== 'transform' && this.doc) this.tools.transform.activate();
+      this.requestRender();
+    }
+    onBrushChanged(fromQuick) {
+      if (!fromQuick) { this.qSize.sync(); this.qOpacity.sync(); }
+      else if (App.settings.dockTab === 'brush' && this.dockBody.contains(this.pBrush.el)) U.$$('.sl', this.pBrush.el).forEach(s => s.sync && s.sync());
+      this.renderOpts();
+      this.requestRender();
+    }
+
+    renderOpts() {
+      const S = App.settings, name = this.toolName, o = [];
+      if (name === 'brush') {
+        o.push(h('div', { class: 'chips' }, ['pencil', 'pen', 'marker', 'air'].map(k => h('button', {
+          class: 'chip' + (S.currentBrush === k ? ' on' : ''),
+          onclick: () => { S.currentBrush = k; App.saveSettings(); this.onBrushChanged(); if (this.dockBody.contains(this.pBrush.el)) this.pBrush.render(); },
+        }, S.brushes[k].name))));
+      } else if (name === 'fill') {
+        o.push(App.ui.slider({ label: '허용치', min: 0, max: 128, step: 1, get: () => S.fill.tolerance, set: v => { S.fill.tolerance = v; } }),
+          App.ui.seg({ options: [['layer', '현재 레이어'], ['all', '모든 레이어']], get: () => S.fill.sample, set: v => { S.fill.sample = v; } }),
+          App.ui.slider({ label: '확장', min: 0, max: 4, step: 1, get: () => S.fill.expand, set: v => { S.fill.expand = v; }, fmt: v => v + 'px' }));
+      } else if (name === 'select' || name === 'lasso') {
+        o.push(App.ui.seg({ options: [['new', '새로'], ['add', '추가'], ['sub', '빼기']], get: () => S.selMode, set: v => { S.selMode = v; } }),
+          h('button', { class: 'btn small', onclick: () => this.selectAll() }, '전체 선택'));
+      } else if (name === 'transform') {
+        const t = this.tools.transform;
+        if (t.active) {
+          o.push(App.ui.toggle({ label: '비율 고정', get: () => S.transformKeepRatio, set: v => { S.transformKeepRatio = v; } }),
+            U.iconBtn('flipH', '좌우 반전', () => t.flip('h')),
+            U.iconBtn('flipV', '상하 반전', () => t.flip('v')),
+            h('button', { class: 'btn small', onclick: () => { t.revert(); } }, '취소'),
+            h('button', { class: 'btn small primary', onclick: () => { t.commit(); } }, '확정'));
+        } else o.push(h('span', { class: 'hint' }, '레이어(또는 선택 영역)를 드래그해 이동 · 모서리로 크기 · 바깥쪽 드래그로 회전'));
+      }
+      this.opts.replaceChildren(...o);
+      this.opts.hidden = !o.length;
+      this.renderCtxbar();
+    }
+    renderCtxbar() {
+      const sel = this.doc?.selection;
+      const show = sel && this.toolName !== 'transform';
+      this.ctxbar.hidden = !show;
+      if (!show) return;
+      this.ctxbar.replaceChildren(
+        h('button', { class: 'btn small', onclick: () => this.setSelection(null) }, '선택 해제'),
+        h('button', { class: 'btn small', onclick: () => this.invertSelection() }, '반전'),
+        h('button', { class: 'btn small', onclick: () => this.clearLayer() }, '지우기'),
+        h('button', { class: 'btn small', onclick: () => this.copyToNewLayer() }, '새 레이어로 복사'),
+        h('button', { class: 'btn small primary', onclick: () => this.setTool('transform') }, '변형'));
+    }
+    updateSwatch() { this.swatch.style.background = this.color; }
+    updateTitle() {
+      if (!this.ctx) return;
+      const total = this.list.length;
+      this.nameEl.replaceChildren(...[
+        h('span', { class: 'e-name' }, this.ctx.name),
+        this.dirty && h('i', { class: 'dirty', title: '저장 안 됨' }),
+        h('small', null, this.idx >= 0 ? ` ${this.idx + 1}/${total}` : ' 새 노트')].filter(Boolean));
+      this.btnPrev.disabled = this.idx <= 0;
+      this.btnNext.disabled = this.idx >= total - 1;
+    }
+    async moreMenu(btn) {
+      const v = await U.menuAt(btn, [
+        { label: '화면에 맞추기 (Ctrl+0)', value: 'fit' },
+        { label: '실제 크기 (100%)', value: '100' },
+        '-',
+        { label: '이미지 다운로드 (PNG)', value: 'export' },
+        { label: '편집파일 다운로드 (.mnote)', value: 'exportProj' },
+        { label: `캔버스 정보 (${this.doc ? this.doc.w + '×' + this.doc.h : ''})`, value: 'info' },
+        '-',
+        { label: '설정', value: 'settings' },
+      ]);
+      if (v === 'fit') this.fit();
+      else if (v === '100') this.zoomAt(this.stage.clientWidth / 2, this.stage.clientHeight / 2, 1 / this.z);
+      else if (v === 'export') U.download(await U.canvasToBlob(this.doc.flatten()), U.baseName(this.ctx.name) + '.png');
+      else if (v === 'exportProj') U.download(await App.project.encode(this.doc, { name: this.ctx.name }), this.ctx.name + App.project.EXT);
+      else if (v === 'info') U.dialog({ title: '캔버스 정보', body: `${this.ctx.name}\n${this.doc.w} × ${this.doc.h}px · 레이어 ${this.doc.layers.length}개\n저장 위치: ${App.library.backend?.label || ''}` });
+      else if (v === 'settings') App.openSettings();
+    }
+    showLoading(on, entry) {
+      this.loadingEl.hidden = !on;
+      if (!on) { this.loadingEl.replaceChildren(); return; }
+      const url = entry && App.gallery?.thumbUrl(entry);
+      this.loadingEl.replaceChildren(url ? h('img', { src: url }) : '', h('div', { class: 'spinner' }));
+    }
+
+    // ================= document lifecycle =================
+    async open(list, idx) {
+      this.list = list; this.idx = idx;
+      App.show('editor');
+      await this.loadIndex(idx);
+    }
+    openNew() {
+      if (!App.library.backend) return;
+      this.list = App.library.images; this.idx = -1;
+      App.show('editor');
+      const { doc, ctx } = App.library.newDoc();
+      this.setDoc(doc, ctx, false);
+    }
+    async loadIndex(i) {
+      const entry = this.list[i];
+      if (!entry) return;
+      this.loading = true;
+      this.doc = null; this.requestRender();
+      this.showLoading(true, entry);
+      this.nameEl.textContent = entry.name;
+      try {
+        const r = await App.library.open(entry);
+        if (this.list[this.idx] !== entry) return;
+        this.setDoc(r.doc, r.ctx, r.dirty);
+      } catch (e) {
+        if ((await App.handleError(e, '열기 실패')) === 'retry') return this.loadIndex(i);
+      } finally {
+        this.loading = false;
+        this.showLoading(false);
+      }
+    }
+    setDoc(doc, ctx, dirty) {
+      this.action = null; this.gesture = null; this.pointers.clear();
+      this.tools.transform.f = null;
+      this.doc = doc; this.ctx = ctx;
+      this.bufs = null;
+      this.history.clear();
+      this.dirty = !!dirty;
+      doc.renderComposite(null);
+      this.resize(true);
+      this.updateTitle();
+      this.pLayers.render();
+      this.renderOpts();
+      if (this.toolName === 'transform') this.setTool('brush');
+      if (doc.w * doc.h > 25e6) U.toast('큰 이미지라 느릴 수 있어요');
+    }
+    buffers() {
+      const d = this.doc;
+      if (!this.bufs || this.bufs.w !== d.w || this.bufs.h !== d.h) {
+        const stroke = U.canvas(d.w, d.h), masked = U.canvas(d.w, d.h);
+        this.bufs = { w: d.w, h: d.h, stroke, masked, strokeCtx: stroke.getContext('2d'), maskedCtx: masked.getContext('2d') };
+      }
+      return this.bufs;
+    }
+    async leaveGuard() {
+      if (!this.doc) return true;
+      if (this.action) this.cancelAction(true);
+      this.tools.transform.commit();
+      if (!this.dirty) return true;
+      if (App.settings.autosave) return this.save();
+      const r = await U.dialog({
+        title: '저장할까요?', body: '변경 내용이 아직 저장되지 않았어요.',
+        buttons: [{ label: '취소', value: null }, { label: '저장 안 함', value: 'discard', danger: true }, { label: '저장', value: 'save', primary: true }],
+      });
+      if (r === 'save') return this.save();
+      return r === 'discard';
+    }
+    async close() {
+      if (this.closing) return false;
+      this.closing = true;
+      try {
+        if (!(await this.leaveGuard())) return false;
+        const cur = this.ctx?.image;
+        this.doc = null; this.ctx = null; this.bufs = null;
+        this.history.clear();
+        App.show('gallery');
+        App.gallery.render(cur);
+        return true;
+      } finally { this.closing = false; }
+    }
+    async navigate(delta) {
+      if (this.loading || this.saving || this.navBusy) return;
+      const ni = this.idx + delta;
+      if (ni < 0 || ni >= this.list.length) { this.bounce(delta); return; }
+      this.navBusy = true;
+      try {
+        if (!(await this.leaveGuard())) { this.snapBack(); return; }
+        const W = this.stage.clientWidth;
+        const cv = this.canvas;
+        cv.style.transition = 'transform .16s ease-in';
+        cv.style.transform = `translateX(${-delta * W}px)`;
+        await U.sleep(150);
+        cv.style.transition = 'none';
+        cv.style.transform = `translateX(${delta * W * 0.4}px)`;
+        this.idx = ni;
+        await this.loadIndex(ni);
+        requestAnimationFrame(() => {
+          cv.style.transition = 'transform .18s ease-out';
+          cv.style.transform = 'translateX(0)';
+        });
+      } finally { this.navBusy = false; }
+    }
+    bounce(delta) {
+      const cv = this.canvas;
+      cv.style.transition = 'transform .12s ease-out';
+      cv.style.transform = `translateX(${-delta * 30}px)`;
+      setTimeout(() => this.snapBack(), 120);
+    }
+    snapBack() {
+      const cv = this.canvas;
+      cv.style.transition = 'transform .18s ease-out';
+      cv.style.transform = 'translateX(0)';
+    }
+    async save() {
+      if (!this.doc || this.saving) return false;
+      if (this.action) this.cancelAction(true);
+      this.tools.transform.commit();
+      this.saving = true;
+      this.btnSave.classList.add('busy');
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            await App.library.save(this.doc, this.ctx);
+            this.dirty = false;
+            if (this.idx < 0) { this.list = App.library.images; this.idx = this.list.indexOf(this.ctx.image); }
+            this.updateTitle();
+            U.toast('저장됨 · 원본 이미지와 편집파일이 모두 갱신됐어요');
+            return true;
+          } catch (e) {
+            if ((await App.handleError(e, '저장 실패')) !== 'retry') return false;
+          }
+        }
+        return false;
+      } finally {
+        this.saving = false;
+        this.btnSave.classList.remove('busy');
+      }
+    }
+
+    // ================= history / changes =================
+    pushHistory(e) { this.history.push(e); }
+    onHistory(e) {
+      if (e) { this.dirty = true; this.updateTitle(); }
+      this.btnUndo.disabled = !this.history.undos.length;
+      this.btnRedo.disabled = !this.history.redos.length;
+    }
+    changed(r) { this.requestComposite(r); this.refreshLayersSoon(); }
+    undo() {
+      if (!this.doc || this.action) return;
+      if (this.tools.transform.active) { this.tools.transform.revert(); return; }
+      if (this.history.undo()) { this.renderCtxbar(); this.pLayers.render(); }
+    }
+    redo() {
+      if (!this.doc || this.action) return;
+      if (this.history.redo()) this.pLayers.render();
+    }
+
+    // ================= colour =================
+    setColor(c, commit) {
+      this.color = c;
+      App.settings.color = c;
+      if (commit) {
+        const rc = App.settings.recentColors.filter(x => x !== c);
+        rc.unshift(c);
+        App.settings.recentColors = rc.slice(0, 16);
+        App.saveSettings();
+      }
+      this.updateSwatch();
+      this.pColor.sync();
+    }
+    colorRGB() { return App.ui.hex2rgb(this.color); }
+
+    // ================= layers =================
+    struct(fn) {
+      const doc = this.doc;
+      this.tools.transform.commit();
+      const b = H.snap(doc);
+      fn();
+      const a = H.snap(doc);
+      this.pushHistory(H.struct(doc, b, a, () => this.changed(null)));
+      this.changed(null);
+      this.pLayers.render();
+    }
+    addLayer() {
+      const doc = this.doc;
+      this.struct(() => {
+        const L = doc.createLayer(doc.nextLayerName());
+        doc.layers.splice(doc.layers.indexOf(doc.active) + 1, 0, L);
+        doc.active = L;
+      });
+      return doc.active;
+    }
+    duplicateLayer() {
+      const doc = this.doc, A = doc.active;
+      this.struct(() => {
+        const L = doc.createLayer(A.name + ' 복사');
+        L.ctx.drawImage(A.canvas, 0, 0);
+        Object.assign(L, { visible: A.visible, opacity: A.opacity, blend: A.blend, alphaLock: A.alphaLock });
+        doc.layers.splice(doc.layers.indexOf(A) + 1, 0, L);
+        doc.active = L;
+      });
+    }
+    deleteLayer() {
+      const doc = this.doc;
+      if (doc.layers.length <= 1) { U.toast('마지막 레이어는 삭제할 수 없어요'); return; }
+      this.struct(() => {
+        const i = doc.layers.indexOf(doc.active);
+        doc.layers.splice(i, 1);
+        doc.active = doc.layers[Math.max(0, i - 1)];
+      });
+    }
+    moveLayer(dir) {
+      const doc = this.doc, i = doc.layers.indexOf(doc.active), j = i + dir;
+      if (j < 0 || j >= doc.layers.length) return;
+      this.struct(() => { const L = doc.layers.splice(i, 1)[0]; doc.layers.splice(j, 0, L); });
+    }
+    mergeDown() {
+      const doc = this.doc, A = doc.active, i = doc.layers.indexOf(A);
+      if (i === 0) { U.toast('아래에 병합할 레이어가 없어요'); return; }
+      if (!A.visible) { U.toast('숨긴 레이어는 병합할 수 없어요'); return; }
+      this.tools.transform.commit();
+      const B = doc.layers[i - 1], r = U.rFull(doc.w, doc.h);
+      const before = B.ctx.getImageData(0, 0, doc.w, doc.h);
+      B.ctx.save();
+      B.ctx.globalAlpha = A.opacity;
+      B.ctx.globalCompositeOperation = A.blend;
+      B.ctx.drawImage(A.canvas, 0, 0);
+      B.ctx.restore();
+      B.rev++;
+      const pix = H.pixels(doc, B, r, before, rr => this.changed(rr));
+      const sb = H.snap(doc);
+      doc.layers.splice(i, 1);
+      doc.active = B;
+      const st = H.struct(doc, sb, H.snap(doc), () => this.changed(null));
+      this.pushHistory(H.group([pix, st]));
+      this.changed(null);
+      this.pLayers.render();
+    }
+    selectLayer(L) {
+      if (this.doc.active === L) return;
+      this.tools.transform.commit();
+      this.doc.active = L;
+      this.pLayers.render();
+    }
+    setLayerProp(L, prop, v, commit) {
+      if (!this.propBefore) this.propBefore = H.snap(this.doc);
+      L[prop] = v;
+      this.requestComposite(null);
+      if (commit) {
+        const b = this.propBefore, a = H.snap(this.doc);
+        this.propBefore = null;
+        if (JSON.stringify(b.layers.map(o => [o.name, o.visible, o.opacity, o.blend, o.alphaLock])) !==
+          JSON.stringify(a.layers.map(o => [o.name, o.visible, o.opacity, o.blend, o.alphaLock]))) {
+          this.pushHistory(H.struct(this.doc, b, a, () => { this.changed(null); this.pLayers.render(); }));
+        }
+        this.pLayers.render();
+      }
+    }
+    async renameLayer(L) {
+      const n = await U.dialog({ title: '레이어 이름', input: { value: L.name }, buttons: [{ label: '취소', value: null }, { label: '확인', value: true, primary: true }] });
+      if (n && n.trim() && n.trim() !== L.name) this.struct(() => { L.name = n.trim(); });
+    }
+    clearLayer() {
+      const doc = this.doc, L = doc.active, sel = doc.selection;
+      this.tools.transform.commit();
+      const r = sel ? sel.bounds : U.rFull(doc.w, doc.h);
+      if (!r) return;
+      const before = L.ctx.getImageData(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
+      L.ctx.save();
+      if (sel) { L.ctx.globalCompositeOperation = 'destination-out'; L.ctx.drawImage(sel.mask, 0, 0); }
+      else L.ctx.clearRect(0, 0, doc.w, doc.h);
+      L.ctx.restore();
+      L.rev++;
+      this.pushHistory(H.pixels(doc, L, r, before, rr => this.changed(rr)));
+      this.changed(r);
+    }
+    selectionCanvas() {
+      const doc = this.doc, sel = doc.selection, L = doc.active;
+      const b = sel ? sel.bounds : doc.contentBounds(L);
+      if (!b) return null;
+      const w = b.x1 - b.x0, hh = b.y1 - b.y0;
+      const c = U.canvas(w, hh), x = c.getContext('2d');
+      x.drawImage(L.canvas, b.x0, b.y0, w, hh, 0, 0, w, hh);
+      if (sel) { x.globalCompositeOperation = 'destination-in'; x.drawImage(sel.mask, b.x0, b.y0, w, hh, 0, 0, w, hh); }
+      return { c, b };
+    }
+    copyToNewLayer() {
+      const s = this.selectionCanvas();
+      if (!s) return;
+      const src = this.doc.active;
+      this.struct(() => {
+        const L = this.doc.createLayer(src.name + ' 조각');
+        L.ctx.drawImage(s.c, s.b.x0, s.b.y0);
+        this.doc.layers.splice(this.doc.layers.indexOf(src) + 1, 0, L);
+        this.doc.active = L;
+      });
+      this.setSelection(null);
+    }
+    async copy(cut) {
+      const s = this.selectionCanvas();
+      if (!s) return;
+      this.clip = s;
+      try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': U.canvasToBlob(s.c) })]); } catch { /* internal clipboard only */ }
+      if (cut) this.clearLayer();
+      U.toast(cut ? '잘라냈어요' : '복사했어요');
+    }
+    async pasteImage(blobOrCanvas, at) {
+      const doc = this.doc;
+      let src = blobOrCanvas;
+      if (src instanceof Blob) src = await createImageBitmap(src);
+      const w = src.width, hh = src.height;
+      const s = Math.min(1, doc.w / w, doc.h / hh);
+      this.struct(() => {
+        const L = doc.createLayer('붙여넣기');
+        const x = at ? at.x0 : (doc.w - w * s) / 2, y = at ? at.y0 : (doc.h - hh * s) / 2;
+        L.ctx.drawImage(src, x, y, w * s, hh * s);
+        doc.layers.splice(doc.layers.indexOf(doc.active) + 1, 0, L);
+        doc.active = L;
+      });
+      this.setSelection(null);
+      this.setTool('transform');
+    }
+
+    // ================= selection =================
+    setSelection(sel) {
+      if (!this.doc) return;
+      this.doc.selection = sel;
+      this.renderCtxbar();
+      this.requestRender();
+    }
+    selectAll() { const s = new App.Selection(this.doc.w, this.doc.h); s.selectAll(); this.setSelection(s); }
+    invertSelection() {
+      const doc = this.doc;
+      const s = doc.selection ? doc.selection.clone() : new App.Selection(doc.w, doc.h);
+      s.invert();
+      this.setSelection(s.empty ? null : s);
+    }
+    onTransformState() { this.renderOpts(); this.requestRender(); }
+
+    // ================= view =================
+    resize(refit) {
+      const wide = this.isWide();
+      if (wide !== this.wasWide) { this.wasWide = wide; this.layoutDock(); }
+      const r = this.stage.getBoundingClientRect();
+      this.dpr = devicePixelRatio || 1;
+      const W = Math.round(r.width * this.dpr), Hh = Math.round(r.height * this.dpr);
+      const wasFit = Math.abs(this.z - this.fitZ) < 1e-6;
+      if (this.canvas.width !== W || this.canvas.height !== Hh) { this.canvas.width = W; this.canvas.height = Hh; }
+      if (this.doc && (refit || wasFit)) this.fit(); else this.requestRender();
+    }
+    fit() {
+      if (!this.doc) return;
+      const cw = this.stage.clientWidth, ch = this.stage.clientHeight;
+      const pad = this.isWide() ? 28 : 6;
+      this.fitZ = Math.max(0.01, Math.min((cw - pad * 2) / this.doc.w, (ch - pad * 2) / this.doc.h));
+      this.z = this.fitZ;
+      this.ox = (cw - this.doc.w * this.z) / 2;
+      this.oy = (ch - this.doc.h * this.z) / 2;
+      this.requestRender();
+    }
+    toDoc(sx, sy) { return [(sx - this.ox) / this.z, (sy - this.oy) / this.z]; }
+    toScreen(x, y) { return [x * this.z + this.ox, y * this.z + this.oy]; }
+    zoomAt(sx, sy, f) {
+      const [dx, dy] = this.toDoc(sx, sy);
+      this.z = U.clamp(this.z * f, Math.min(0.05, this.fitZ), 32);
+      this.ox = sx - dx * this.z; this.oy = sy - dy * this.z;
+      this.requestRender();
+    }
+    panBy(dx, dy) { this.ox += dx; this.oy += dy; this.requestRender(); }
+    isFitView() { return this.z <= this.fitZ * 1.08; }
+
+    requestComposite(r) {
+      if (r === null) this.compAll = true; else this.compRect = U.rUnion(this.compRect, r);
+      this.requestRender();
+    }
+    requestRender() {
+      if (this.raf) return;
+      this.raf = requestAnimationFrame(() => { this.raf = 0; this.render(); });
+    }
+    checker() {
+      if (!this._checker) {
+        const c = U.canvas(16, 16), g = c.getContext('2d');
+        g.fillStyle = '#fff'; g.fillRect(0, 0, 16, 16);
+        g.fillStyle = '#e4e4e7'; g.fillRect(0, 0, 8, 8); g.fillRect(8, 8, 8, 8);
+        this._checker = this.vctx.createPattern(c, 'repeat');
+      }
+      return this._checker;
+    }
+    render() {
+      const c = this.vctx, doc = this.doc, dpr = this.dpr;
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      if (!doc) return;
+      if (this.compAll) doc.renderComposite(null);
+      else if (this.compRect) doc.renderComposite(this.compRect);
+      this.compAll = false; this.compRect = null;
+
+      const z = this.z * dpr, x = this.ox * dpr, y = this.oy * dpr, w = doc.w * z, hh = doc.h * z;
+      c.save();
+      c.shadowColor = 'rgba(0,0,0,.28)'; c.shadowBlur = 14 * dpr; c.shadowOffsetY = 2 * dpr;
+      c.fillStyle = '#fff'; c.fillRect(x, y, w, hh);
+      c.restore();
+      c.save();
+      c.beginPath(); c.rect(x, y, w, hh); c.clip();
+      c.fillStyle = this.checker(); c.fillRect(x, y, w, hh);
+      c.setTransform(z, 0, 0, z, x, y);
+      c.imageSmoothingEnabled = this.z < 2;
+      c.imageSmoothingQuality = 'high';
+      c.drawImage(doc.composite, 0, 0);
+      if (doc.selection && !this.tools.transform.active) c.drawImage(doc.selection.overlay(), 0, 0);
+      c.restore();
+
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (doc.selection && !this.tools.transform.active) {
+        c.save();
+        c.beginPath();
+        for (const pts of doc.selection.paths) {
+          pts.forEach(([px, py], i) => { const s = this.toScreen(px, py); i ? c.lineTo(s[0], s[1]) : c.moveTo(s[0], s[1]); });
+          c.closePath();
+        }
+        c.lineWidth = 1; c.strokeStyle = '#fff'; c.stroke();
+        c.setLineDash([4, 4]); c.lineDashOffset = -this.ants; c.strokeStyle = '#111'; c.stroke();
+        c.restore();
+      }
+      const tool = this.action?.tool || this.tools[this.toolName];
+      tool.drawOverlay?.(c);
+      if (tool !== this.tools.transform) this.tools.transform.drawOverlay(c);
+      const hv = this.hover;
+      if (hv && hv.type !== 'touch' && (this.toolName === 'brush' || this.toolName === 'eraser')) {
+        const r = Math.max(1.5, this.preset().size * this.z / 2);
+        c.beginPath(); c.arc(hv.sx, hv.sy, r, 0, Math.PI * 2);
+        c.lineWidth = 1; c.strokeStyle = 'rgba(255,255,255,.9)'; c.stroke();
+        c.beginPath(); c.arc(hv.sx, hv.sy, r + 1, 0, Math.PI * 2);
+        c.strokeStyle = 'rgba(0,0,0,.6)'; c.stroke();
+      }
+    }
+
+    // ================= input =================
+    bindInput() {
+      const cv = this.canvas;
+      cv.addEventListener('pointerdown', e => this.onDown(e));
+      cv.addEventListener('pointermove', e => this.onMove(e));
+      cv.addEventListener('pointerup', e => this.onUp(e, false));
+      cv.addEventListener('pointercancel', e => this.onUp(e, true));
+      cv.addEventListener('pointerleave', e => { if (e.pointerType !== 'touch' && !this.pointers.size) { this.hover = null; this.requestRender(); } });
+      cv.addEventListener('wheel', e => this.onWheel(e), { passive: false });
+      cv.addEventListener('contextmenu', e => e.preventDefault());
+      window.addEventListener('keydown', e => this.onKey(e));
+      window.addEventListener('keyup', e => { if (e.code === 'Space') { this.spaceDown = false; this.canvas.style.cursor = this.tools[this.toolName].cursor; } });
+      document.addEventListener('paste', e => {
+        if (!this.visible || !this.doc || e.target.matches?.('input,textarea')) return;
+        const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+        if (item) { e.preventDefault(); this.pasteImage(item.getAsFile()); }
+        else if (this.clip) { e.preventDefault(); this.pasteImage(this.clip.c, this.clip.b); }
+      });
+    }
+    ptOf(e) {
+      const r = this.canvasRect || (this.canvasRect = this.canvas.getBoundingClientRect());
+      const sx = e.clientX - r.left, sy = e.clientY - r.top;
+      const [x, y] = this.toDoc(sx, sy);
+      let p = 1;
+      if (e.pointerType === 'pen') p = e.pressure > 0 ? e.pressure : 0.3;
+      // some tablet drivers report the pen as a mouse but still send real pressure (mouse is always 0 or 0.5)
+      else if (e.pointerType === 'mouse' && e.pressure > 0 && e.pressure !== 0.5) p = e.pressure;
+      return { x, y, sx, sy, p, type: e.pointerType };
+    }
+    onDown(e) {
+      if (!this.doc || this.loading) return;
+      if (e.pointerType === 'touch' && this.action && this.action.type === 'pen') return; // palm while drawing
+      if (!this.isWide() && this.sheetOpen) { this.sheetOpen = false; this.layoutDock(); }
+      this.canvasRect = this.canvas.getBoundingClientRect();
+      const pt = this.ptOf(e);
+      this.pointers.set(e.pointerId, { x: pt.sx, y: pt.sy, x0: pt.sx, y0: pt.sy, type: e.pointerType });
+      try { this.canvas.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      if (e.pointerType === 'pen') this.penSeen = true;
+
+      if (e.pointerType === 'touch') {
+        const n = this.touchCount();
+        if (this.gesture) { this.gesture.max = Math.max(this.gesture.max, n); this.gesture.base = this.gestureBase(); return; }
+        if (n >= 2) {
+          if (this.action) {
+            const a = this.action;
+            if (a.kind === 'tool') {
+              // a second finger arrived: short stroke = start of a pinch → throw away, long stroke = keep it
+              if (performance.now() - a.t0 < 350) a.tool.cancel(); else a.tool.up(a.lastPt || pt, e);
+            }
+            if (a.kind === 'swipe') this.snapBack();
+            this.action = null;
+          }
+          this.gesture = { t0: performance.now(), max: n, moved: false, base: this.gestureBase() };
+          return;
+        }
+        if (this.action) return;
+        const fingerDraws = App.settings.fingerDraw && !(App.settings.palmRejection && this.penSeen);
+        if (!fingerDraws && this.toolName !== 'transform' && this.toolName !== 'hand') {
+          this.action = this.isFitView() && this.list.length
+            ? { kind: 'swipe', id: e.pointerId, x0: pt.sx, y0: pt.sy, t0: performance.now(), dx: 0, type: 'touch' }
+            : { kind: 'pan', id: e.pointerId, last: pt, type: 'touch' };
+          return;
+        }
+      } else if (this.action) return;
+
+      let name = this.toolName;
+      if (e.pointerType === 'mouse') {
+        if (e.button === 1 || this.spaceDown) { this.action = { kind: 'pan', id: e.pointerId, last: pt, type: 'mouse' }; return; }
+        if (e.button === 2) { this.tools.picker.pick(pt); this.setColor(this.color, true); return; }
+        if (e.button !== 0) return;
+      }
+      if (e.pointerType === 'pen' && (e.buttons & 32)) name = 'eraser';
+      if (this.spaceDown) name = 'hand';
+      if (e.altKey && (name === 'brush' || name === 'eraser' || name === 'fill')) name = 'picker';
+      const tool = this.tools[name];
+      if (tool.down(pt, e) === false) return;
+      this.action = { kind: 'tool', id: e.pointerId, tool, type: e.pointerType, t0: performance.now(), lastPt: pt };
+    }
+    onMove(e) {
+      const P = this.pointers.get(e.pointerId);
+      if (!P) {
+        if (e.pointerType !== 'touch' && this.doc) {
+          this.canvasRect = this.canvasRect || this.canvas.getBoundingClientRect();
+          this.hover = this.ptOf(e);
+          this.requestRender();
+        }
+        return;
+      }
+      const pt = this.ptOf(e);
+      P.x = pt.sx; P.y = pt.sy;
+      if (Math.hypot(P.x - P.x0, P.y - P.y0) > 12 && this.gesture) this.gesture.moved = true;
+      if (this.gesture) { this.updateGesture(); return; }
+      const a = this.action;
+      if (!a || a.id !== e.pointerId) return;
+      if (a.kind === 'pan') { this.panBy(pt.sx - a.last.sx, pt.sy - a.last.sy); a.last = pt; return; }
+      if (a.kind === 'swipe') { this.swipeMove(a, pt); return; }
+      if (a.kind === 'tool') {
+        const evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
+        for (const ce of evs.length ? evs : [e]) a.tool.move(this.ptOf(ce), e);
+        a.tool.frame?.();
+        a.lastPt = pt;
+        if (e.pointerType !== 'touch') this.hover = pt;
+        this.requestRender();
+      }
+    }
+    onUp(e, cancelled) {
+      if (!this.pointers.has(e.pointerId)) return;
+      this.pointers.delete(e.pointerId);
+      if (this.gesture) {
+        if (!this.touchCount()) {
+          const g = this.gesture;
+          this.gesture = null;
+          if (!g.moved && performance.now() - g.t0 < 320) { if (g.max === 2) this.undo(); else if (g.max >= 3) this.redo(); }
+        } else this.gesture.base = this.gestureBase();
+        return;
+      }
+      const a = this.action;
+      if (!a || a.id !== e.pointerId) return;
+      this.action = null;
+      if (a.kind === 'tool') {
+        if (cancelled) a.tool.cancel(); else a.tool.up(this.ptOf(e), e);
+        this.requestRender();
+      } else if (a.kind === 'swipe') this.swipeEnd(a);
+    }
+    cancelAction(commit) {
+      const a = this.action;
+      this.action = null;
+      if (a && a.kind === 'tool') { if (commit) a.tool.up(a.lastPt, {}); else a.tool.cancel(); }
+    }
+    touchCount() { let n = 0; for (const p of this.pointers.values()) if (p.type === 'touch') n++; return n; }
+    gestureBase() {
+      const ts = [...this.pointers.values()].filter(p => p.type === 'touch');
+      if (ts.length < 2) return null;
+      const [a, b] = ts;
+      return { cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) || 1, z: this.z, ox: this.ox, oy: this.oy };
+    }
+    updateGesture() {
+      const g = this.gesture, B = g.base;
+      if (!B) { g.base = this.gestureBase(); return; }
+      const ts = [...this.pointers.values()].filter(p => p.type === 'touch');
+      if (ts.length < 2) return;
+      const [a, b] = ts;
+      const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2, d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      const z = U.clamp(B.z * d / B.d, Math.min(0.05, this.fitZ), 32);
+      const dx = (B.cx - B.ox) / B.z, dy = (B.cy - B.oy) / B.z;
+      this.z = z; this.ox = cx - dx * z; this.oy = cy - dy * z;
+      this.requestRender();
+    }
+    swipeMove(a, pt) {
+      const dx = pt.sx - a.x0, dy = pt.sy - a.y0;
+      if (!a.dir) {
+        if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) a.dir = 'h';
+        else if (Math.abs(dy) > 10) { a.dir = 'v'; a.last = pt; }
+      }
+      if (a.dir === 'h') {
+        let d = dx;
+        if ((d > 0 && this.idx <= 0) || (d < 0 && this.idx >= this.list.length - 1)) d *= 0.3;
+        a.dx = d;
+        const now = performance.now();
+        if (a.lt) a.v = (pt.sx - a.lx) / Math.max(1, now - a.lt);
+        a.lx = pt.sx; a.lt = now;
+        this.canvas.style.transition = 'none';
+        this.canvas.style.transform = `translateX(${d}px)`;
+      } else if (a.dir === 'v') { this.panBy(0, pt.sy - a.last.sy); a.last = pt; }
+    }
+    swipeEnd(a) {
+      if (a.dir !== 'h') return;
+      const W = this.stage.clientWidth;
+      const delta = a.dx < 0 ? 1 : -1;
+      const can = this.idx + delta >= 0 && this.idx + delta < this.list.length;
+      if (can && (Math.abs(a.dx) > W * 0.2 || Math.abs(a.v || 0) > 0.6)) this.navigate(delta);
+      else this.snapBack();
+    }
+    onWheel(e) {
+      e.preventDefault();
+      if (!this.doc) return;
+      const r = this.canvas.getBoundingClientRect();
+      const sx = e.clientX - r.left, sy = e.clientY - r.top;
+      if (e.shiftKey) { this.panBy(-e.deltaY, 0); return; }
+      const k = e.ctrlKey ? 0.01 : e.deltaMode === 1 ? 0.05 : 0.0018;
+      this.zoomAt(sx, sy, Math.exp(-e.deltaY * k));
+    }
+    onKey(e) {
+      if (!this.visible || !this.doc) return;
+      if (e.target.matches && e.target.matches('input,textarea,select')) return;
+      if (document.querySelector('.modal-back, .menu-back')) return;
+      const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
+      const t = this.tools.transform;
+      const stop = () => { e.preventDefault(); e.stopPropagation(); };
+      if (mod) {
+        if (k === 'z') { stop(); e.shiftKey ? this.redo() : this.undo(); }
+        else if (k === 'y') { stop(); this.redo(); }
+        else if (k === 's') { stop(); this.save(); }
+        else if (k === 'a') { stop(); this.selectAll(); }
+        else if (k === 'd') { stop(); this.setSelection(null); }
+        else if (k === 'i' && e.shiftKey) { stop(); this.invertSelection(); }
+        else if (k === 'c') { stop(); this.copy(false); }
+        else if (k === 'x') { stop(); this.copy(true); }
+        else if (k === 't') { stop(); this.setTool('transform'); }
+        else if (k === '0') { stop(); this.fit(); }
+        else if (k === '=' || k === '+') { stop(); this.zoomAt(this.stage.clientWidth / 2, this.stage.clientHeight / 2, 1.25); }
+        else if (k === '-') { stop(); this.zoomAt(this.stage.clientWidth / 2, this.stage.clientHeight / 2, 0.8); }
+        return;
+      }
+      if (e.code === 'Space') { stop(); if (!this.spaceDown) { this.spaceDown = true; this.canvas.style.cursor = 'grab'; } return; }
+      if (KEYS[k] && !e.altKey) { stop(); this.setTool(KEYS[k]); return; }
+      if (k === '[' || k === ']') {
+        const p = this.preset();
+        p.size = posToSize(U.clamp(sizeToPos(p.size) + (k === ']' ? 0.04 : -0.04), 0, 1));
+        this.onBrushChanged(); App.saveSettings();
+        return;
+      }
+      if (k === 'enter' && t.active) { stop(); t.commit(); return; }
+      if (k === 'escape') {
+        if (t.active) { stop(); t.revert(); }
+        else if (this.doc.selection) { stop(); this.setSelection(null); }
+        return;
+      }
+      if ((k === 'delete' || k === 'backspace') && !t.active) { stop(); this.clearLayer(); return; }
+      if (k === 'arrowleft' && !t.active) { stop(); this.navigate(-1); }
+      if (k === 'arrowright' && !t.active) { stop(); this.navigate(1); }
+    }
+  }
+
+  App.editor = new Editor();
+})();
