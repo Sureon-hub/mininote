@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.3.1';
+  App.VERSION = '0.3.2';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -21,6 +21,36 @@
   window.addEventListener('beforeunload', e => {
     if (App.editor.visible && App.editor.dirty) { e.preventDefault(); e.returnValue = ''; }
   });
+
+  // ---------------- install as app (Chrome / Edge) ----------------
+  let installEvt = null;
+  App.isInstalled = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault();
+    installEvt = e;
+    document.body.classList.add('can-install');
+  });
+  window.addEventListener('appinstalled', () => {
+    installEvt = null;
+    document.body.classList.remove('can-install');
+    U.dialog({ title: '설치됐어요', body: '앱 목록(홈 화면에서 위로 쓸어올리기)에서 "미니수첩"을 찾아 여세요.\n아이콘을 길게 눌러 "홈에 추가"하면 홈 화면에도 놓을 수 있어요.' });
+  });
+  App.install = async () => {
+    if (installEvt) {
+      installEvt.prompt();
+      await installEvt.userChoice;
+      installEvt = null;
+      document.body.classList.remove('can-install');
+      return;
+    }
+    U.dialog({
+      title: '앱으로 설치하기',
+      body: App.isInstalled() ? '지금 설치된 앱으로 실행 중이에요.' :
+        '• 안드로이드: 크롬으로 이 주소를 열고 ⋮ → "설치 및 바로가기 만들기" → "설치"\n' +
+        '• PC: Edge/크롬 주소창 오른쪽의 설치 아이콘, 또는 ⋯ → 앱 → "이 사이트를 앱으로 설치"\n\n' +
+        '웨일·삼성 인터넷 등 다른 브라우저에서는 설치가 안 되거나 바로가기만 만들어질 수 있어요. 이미 설치했다면 앱 목록에서 "미니수첩"을 찾아보세요.',
+    });
+  };
 
   // ---------------- errors ----------------
   App.handleError = async (e, title = '오류') => {
@@ -171,6 +201,7 @@
     if (window.showDirectoryPicker) kids.push(h('button', { class: 'home-btn', onclick: pickLocal, html: App.icon('folder') + '<span><b>PC 폴더 열기</b><small>구글 드라이브 동기화 폴더(G:)를 고르면 폰과 자동으로 공유돼요</small></span>' }));
     kids.push(h('button', { class: 'home-btn', onclick: connectDrive, html: App.icon('cloud') + '<span><b>Google Drive 폴더 연결</b><small>폰·태블릿에서는 이 방법을 쓰세요</small></span>' }));
     if (navigator.storage && navigator.storage.getDirectory) kids.push(h('button', { class: 'home-btn', onclick: () => useOpfs().catch(e => App.handleError(e)), html: App.icon('image') + '<span><b>앱 내부 저장소로 체험</b><small>설정 없이 바로 테스트 (이 기기 브라우저 안에만 저장)</small></span>' }));
+    if (!App.isInstalled()) kids.push(h('button', { class: 'home-btn', onclick: () => App.install(), html: App.icon('download') + '<span><b>앱으로 설치</b><small>홈 화면 아이콘으로 바로 열고, 인터넷 없이도 실행돼요</small></span>' }));
     el.replaceChildren(...kids);
     if (S.driveClientId) App.driveAuth.loadGis().catch(() => {});
   };
@@ -210,6 +241,7 @@
         h('button', { class: 'btn small', onclick: () => { App.driveAuth.signOut(); U.toast('로그아웃했어요'); } }, 'Google 로그아웃')),
       h('h4', null, '기타'),
       h('div', { class: 'row' },
+        h('button', { class: 'btn small', onclick: () => App.install() }, App.isInstalled() ? '앱으로 설치됨 ✓' : '앱으로 설치'),
         h('button', { class: 'btn small', onclick: async () => { await U.idbClear('thumbs'); App.gallery.urls.clear(); U.toast('썸네일 캐시를 비웠어요'); App.gallery.render(); } }, '썸네일 캐시 비우기')),
       h('p', { class: 'hint' }, `미니수첩 v${App.VERSION}`));
 

@@ -46,6 +46,8 @@ button { font: inherit; color: inherit; }
 input, select { font: inherit; color: inherit; }
 [hidden] { display: none !important; }
 .grow { flex: 1; }
+.install-only { display: none !important; }
+body.can-install .install-only { display: inline-grid !important; }
 .ico { width: 22px; height: 22px; display: block; flex: none; }
 .hint { color: var(--muted); font-size: 12.5px; margin: 6px 0; line-height: 1.5; }
 

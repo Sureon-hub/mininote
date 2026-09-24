@@ -27,6 +27,7 @@
       this.titleEl = h('div', { class: 'g-title' });
       this.bar.replaceChildren(
         this.btnUp, this.titleEl, h('div', { class: 'grow' }),
+        U.iconBtn('download', '앱으로 설치', () => App.install(), 'install-only accent'),
         U.iconBtn('refresh', '새로고침', () => this.reload()),
         U.iconBtn('grid', '보기', e => this.viewMenu(e.currentTarget)),
         U.iconBtn('sort', '정렬', e => this.sortMenu(e.currentTarget)),
