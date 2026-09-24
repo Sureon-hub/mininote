@@ -11,6 +11,7 @@
     ['lasso', 'lasso', '올가미 선택 (L)'],
     ['transform', 'transform', '변형·이동 (V)'],
     ['picker', 'picker', '스포이트 (I / Alt)'],
+    ['text', 'text', '텍스트 (T)'],
     ['hand', 'hand', '손 도구 (H / Space)'],
   ];
   // snap an angle (radians) to the nearest multiple of 90° when within `deg` degrees; result in (-π, π]
@@ -35,7 +36,7 @@
       this.tools = {
         brush: new T.BrushTool(this, false), eraser: new T.BrushTool(this, true), fill: new T.FillTool(this),
         select: new T.SelectTool(this, 'rect'), lasso: new T.SelectTool(this, 'lasso'),
-        transform: new T.TransformTool(this), picker: new T.PickerTool(this), hand: new T.HandTool(this),
+        transform: new T.TransformTool(this), picker: new T.PickerTool(this), hand: new T.HandTool(this), text: new T.TextTool(this),
       };
       this.toolName = 'brush';
       this.color = App.settings.color;
@@ -138,6 +139,7 @@
     }
 
     setTool(name) {
+      if (this.textEd && name !== 'text') App.text.commit(this);
       if (this.toolName === 'transform' && name !== 'transform') this.tools.transform.commit();
       const prev = this.toolName;
       this.toolName = name;
@@ -161,6 +163,8 @@
       const S = App.settings, name = this.toolName, o = [];
       if (name === 'brush') {
         o.push(this.brushChips());
+      } else if (name === 'text') {
+        o.push(...App.text.optionsBar(this));
       } else if (name === 'fill') {
         o.push(App.ui.slider({ label: '허용치', min: 0, max: 128, step: 1, get: () => S.fill.tolerance, set: v => { S.fill.tolerance = v; } }),
           App.ui.seg({ options: [['layer', '현재 레이어'], ['all', '모든 레이어']], get: () => S.fill.sample, set: v => { S.fill.sample = v; } }),
@@ -186,7 +190,7 @@
     // built-in brushes first, then saved favourites (each favourite is a full brush preset + colour)
     brushKeys() {
       const S = App.settings;
-      return ['pencil', 'pen', 'marker', 'air', ...(S.favOrder || []).filter(k => S.brushes[k])];
+      return ['pencil', 'pen', 'marker', ...(S.favOrder || []).filter(k => S.brushes[k])];
     }
     selectBrush(k) {
       const S = App.settings, B = S.brushes[k];
@@ -336,6 +340,7 @@
       }
     }
     setDoc(doc, ctx, dirty) {
+      if (this.textEd) App.text.cancel(this);
       this.action = null; this.gesture = null; this.pointers.clear();
       this.tools.transform.f = null;
       this.doc = doc; this.ctx = ctx;
@@ -364,6 +369,7 @@
     scheduleFlush(stroke) { this.pendingFlush = stroke; this.requestRender(); }
     async leaveGuard() {
       if (!this.doc) return true;
+      if (this.textEd) await App.text.commit(this);
       if (this.action) this.cancelAction(true);
       this.tools.transform.commit();
       if (!this.dirty) return true;
@@ -423,6 +429,7 @@
     }
     async save() {
       if (!this.doc || this.saving) return false;
+      if (this.textEd) await App.text.commit(this);
       if (this.action) this.cancelAction(true);
       this.tools.transform.commit();
       this.saving = true;
@@ -742,6 +749,7 @@
       c.clearRect(0, 0, this.canvas.width, this.canvas.height);
       if (!doc) return;
       if (this.pendingFlush) { const s = this.pendingFlush; this.pendingFlush = null; s.flush(); }
+      if (this.textEd) App.text.place(this);
       if (this.compAll) doc.renderComposite(null);
       else if (this.compRect) doc.renderComposite(this.compRect);
       this.compAll = false; this.compRect = null;
@@ -829,6 +837,7 @@
     }
     onDown(e) {
       if (!this.doc || this.loading) return;
+      if (this.textEd && e.pointerType !== 'touch' && this.toolName !== 'text') { App.text.commit(this); return; }
       if (e.pointerType === 'touch' && this.action && this.action.type === 'pen') return; // palm while drawing
       if (!this.isWide() && this.sheetOpen) { this.sheetOpen = false; this.layoutDock(); }
       this.canvasRect = this.canvas.getBoundingClientRect();

@@ -23,6 +23,7 @@
       this.alphaLock = false;
       // layer border effect (like CSP "경계 효과" / Photoshop "Stroke"): drawn behind everything on the layer
       this.border = { on: false, color: '#ffffff', width: 4, smooth: 1 };
+      this.text = null; // text layer data (see text.js)
       this.rev = 0; // bumps when pixels change (for thumbnails)
     }
   }
@@ -335,10 +336,16 @@
   };
   History.snap = doc => ({
     active: doc.active,
-    layers: doc.layers.map(L => ({ L, name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend, alphaLock: L.alphaLock, border: { ...L.border } })),
+    layers: doc.layers.map(L => ({ L, name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend, alphaLock: L.alphaLock, border: { ...L.border }, text: L.text ? { ...L.text } : null })),
   });
   History.restore = (doc, s) => {
-    doc.layers = s.layers.map(o => { const { L, ...p } = o; Object.assign(L, p, { border: { ...p.border } }); return L; });
+    doc.layers = s.layers.map(o => {
+      const { L, ...p } = o;
+      const hadText = !!(L.text || p.text), same = JSON.stringify(L.text) === JSON.stringify(p.text);
+      Object.assign(L, p, { border: { ...p.border }, text: p.text ? { ...p.text } : null });
+      if (hadText && !same && L.text) App.text.render(L); // text layers are re-drawn from their data
+      return L;
+    });
     doc.active = s.active;
   };
   History.struct = (doc, before, after, cb) => ({

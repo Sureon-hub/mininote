@@ -9,11 +9,11 @@
     ['도구', [
       ['tool.brush', '브러시', ['b']], ['tool.eraser', '지우개', ['e']], ['tool.fill', '채우기', ['g']],
       ['tool.select', '사각 선택', ['m']], ['tool.lasso', '올가미 선택', ['l']], ['tool.transform', '변형·이동', ['v', 'ctrl+t']],
-      ['tool.picker', '스포이트', ['i']], ['tool.hand', '손 도구', ['h']],
+      ['tool.picker', '스포이트', ['i']], ['tool.text', '텍스트', ['t']], ['tool.hand', '손 도구', ['h']],
     ]],
     ['브러시', [
       ['brush.smaller', '브러시 작게', ['[']], ['brush.bigger', '브러시 크게', [']']],
-      ...Array.from({ length: 9 }, (_, i) => [`brush.fav${i + 1}`, `브러시 목록 ${i + 1}번 (연필·펜·형광펜·에어브러시·즐겨찾기 순)`, [String(i + 1)]]),
+      ...Array.from({ length: 9 }, (_, i) => [`brush.fav${i + 1}`, `브러시 목록 ${i + 1}번 (연필·펜·형광펜·즐겨찾기 순)`, [String(i + 1)]]),
     ]],
     ['편집', [
       ['undo', '실행 취소', ['ctrl+z']], ['redo', '다시 실행', ['ctrl+y', 'ctrl+shift+z']], ['save', '저장', ['ctrl+s']],

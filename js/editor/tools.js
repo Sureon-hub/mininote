@@ -12,6 +12,11 @@
     down(pt) {
       const L = this.ed.doc.active;
       if (!L.visible) { U.toast('숨겨진 레이어에는 그릴 수 없어요'); return false; }
+      if (L.text) {
+        if (this.erase) { U.toast('텍스트는 텍스트 도구로 고쳐주세요 (글상자를 누르면 수정)'); return false; }
+        this.ed.addLayer(); // never paint into a text layer: draw on a fresh layer above it
+        U.toast('텍스트 위에 새 레이어를 만들어 그려요');
+      }
       this.stroke = new App.Stroke(this.ed, this.preset, this.erase, this.ed.color);
       this.sm = { x: pt.x, y: pt.y };
       this.start = { x: pt.x, y: pt.y };
@@ -162,6 +167,7 @@
       const x = Math.floor(pt.x), y = Math.floor(pt.y);
       if (x < 0 || y < 0 || x >= W || y >= H) return;
       if (!L.visible) { U.toast('숨겨진 레이어에는 칠할 수 없어요'); return; }
+      if (L.text) { U.toast('텍스트 레이어에는 칠할 수 없어요. 다른 레이어를 선택하세요'); return; }
       if (doc.selection && doc.selection.ctx.getImageData(x, y, 1, 1).data[3] < 8) return;
       const F = App.settings.fill;
       const src = F.sample === 'all' ? doc.flatten() : L.canvas;
@@ -289,6 +295,7 @@
       if (this.f) return true;
       const ed = this.ed, doc = ed.doc, L = doc.active;
       if (!L.visible) { U.toast('숨겨진 레이어는 변형할 수 없어요'); return false; }
+      if (L.text) { L.text = null; U.toast('텍스트가 이미지로 바뀌어요 (글자 수정은 더 이상 안 돼요)'); }
       const sel = doc.selection;
       const b = sel ? U.rClamp(sel.bounds, doc.w, doc.h) : doc.contentBounds(L);
       if (!b) { U.toast('변형할 내용이 없어요'); return false; }

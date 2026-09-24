@@ -237,6 +237,13 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; height:
 .key-btn.rec { border-color: var(--accent); color: var(--accent); animation: pulse .7s infinite alternate; }
 .key-clear { width: 30px; height: 30px; }
 .key-clear .ico { width: 16px; height: 16px; }
+.text-edit {
+  position: absolute; z-index: 6; margin: 0; padding: 0; border: 0; resize: none; overflow: hidden; white-space: pre;
+  background: rgba(255,255,255,.35); outline: 1.5px dashed var(--accent); outline-offset: 4px; transform-origin: 0 0;
+  min-width: 1em; user-select: text; caret-color: var(--accent);
+}
+.font-sel { width: auto; padding: 5px 8px; }
+.e-opts .sl-label { white-space: nowrap; }
 .rot-badge { position: absolute; right: 10px; bottom: 12px; z-index: 4; border: 0; border-radius: 999px; padding: 6px 12px; background: var(--surface); color: var(--text); box-shadow: 0 2px 10px rgba(0,0,0,.2); cursor: pointer; font-size: 12.5px; }
 .e-loading { position: absolute; inset: 0; display: grid; place-items: center; z-index: 5; pointer-events: none; }
 .e-loading img { position: absolute; max-width: 92%; max-height: 92%; opacity: .55; filter: blur(1px); }

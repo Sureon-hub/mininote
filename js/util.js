@@ -177,6 +177,7 @@ window.App = window.App || {};
     refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/>',
     flipH: '<path d="M12 3v18M8 7l-5 5 5 5V7zM16 7l5 5-5 5V7z"/>',
     flipV: '<path d="M3 12h18M7 8l5-5 5 5H7zM7 16l5 5 5-5H7z"/>',
+    text: '<path d="M4 7V4h16v3M9 20h6M12 4v16"/>',
     image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
     panel: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/>',
     edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
@@ -205,13 +206,13 @@ window.App = window.App || {};
     currentBrush: 'pencil',
     favOrder: [],
     keys: {},
-    settingsVersion: 5,
+    settingsVersion: 6,
+    text: { font: 'sans', size: 48, bold: false },
     pressure: { gamma: 1.0, size: true, minSize: 0.15, opacity: false, minOpacity: 0.25 },
     brushes: {
       pencil: { name: '연필', size: 16, opacity: 1, flow: 1, hardness: 0.55, grain: 0.5, spacing: 0.025, smoothing: 0, pFlow: true, pFlowMin: 0.85, holdLine: false },
       pen: { name: '펜', size: 5, opacity: 1, flow: 1, hardness: 0.97, grain: 0, spacing: 0.05, smoothing: 0.05, holdLine: false },
       marker: { name: '형광펜', size: 30, opacity: 0.6, flow: 1, hardness: 0.95, grain: 0, spacing: 0.03, smoothing: 0, tip: 'square', blend: 'multiply', holdLine: true },
-      air: { name: '에어브러시', size: 90, opacity: 0.6, flow: 0.12, hardness: 0, grain: 0, spacing: 0.08, smoothing: 0.2 },
       eraser: { name: '지우개', size: 30, opacity: 1, flow: 1, hardness: 0.9, grain: 0, spacing: 0.05, smoothing: 0.2 },
     },
     fill: { tolerance: 24, sample: 'layer', expand: 1 },
@@ -249,6 +250,11 @@ window.App = window.App || {};
     B.marker = JSON.parse(JSON.stringify(D.marker));
     B.pen.smoothing = Math.min(B.pen.smoothing, D.pen.smoothing);
     if (App.settings.color === '#3a3a3a') App.settings.color = DEFAULTS.color;
+  }
+  // v6: airbrush removed (text tool added)
+  if (sv < 6) {
+    delete App.settings.brushes.air;
+    if (App.settings.currentBrush === 'air') App.settings.currentBrush = 'pencil';
   }
   App.settings.settingsVersion = DEFAULTS.settingsVersion;
   App.saveSettings = U.debounce(() => {
