@@ -90,7 +90,7 @@
 
     setup(backend, folders, appDir, root) {
       this.backend = backend; this.folders = folders; this.appDir = appDir; this.root = root || null;
-      this.images = []; this.projects = new Map(); this._edited = null; this._dirs = new Map();
+      this.images = []; this.projects = new Map(); this._edited = null; this._dirs = new Map(); this._relinks = new Map();
       const f = App.settings.folderFilter;
       this.filter = f === 'edited' || folders.some(x => x.key === f) ? f : 'all';
     },
@@ -218,7 +218,7 @@
       let f = null;
       if (e.rel) f = await this.resolveRel(e.rel).catch(() => null);
       if (!f && e.external) f = await this.externalEntry(e.project.name, interactive);
-      if (!f && !e.relinkTried) { e.relinkTried = true; f = await this.relink(e).catch(err => { if (err.auth) throw err; return null; }); }
+      if (!f) f = await this.relinkOnce(e);
       if (f) { e.entry = f; e.mtime = f.mtime; e.size = f.size; e.missing = false; } else e.missing = true;
       return f;
     },
@@ -230,6 +230,26 @@
       if ((await fh.queryPermission(opts)) !== 'granted' && (!interactive || (await fh.requestPermission(opts)) !== 'granted')) return null;
       const file = await fh.getFile();
       return { kind: 'file', name: fh.name, handle: fh, mtime: file.lastModified, size: file.size, dir: { kind: 'dir', name: '외부 파일', external: true } };
+    },
+    // one search per edit file at a time: the gallery thumbnail, the preloader and a tap can all ask at once,
+    // and the later ones wait for the running search instead of giving up
+    async relinkOnce(e) {
+      if (!e.relinkP) {
+        const k = e.project.name;
+        let p = this._relinks.get(k);
+        if (!p) {
+          p = this.relink(e);
+          this._relinks.set(k, p);
+          p.catch(() => {}).finally(() => this._relinks.delete(k));
+        } else {
+          p = p.then(f => {
+            if (f) { e.rel = this.relOf(f); e.project = this.projects.get(this.projNameFor(f)) || e.project; }
+            return f;
+          });
+        }
+        e.relinkP = p;
+      }
+      return e.relinkP.catch(err => { if (err.auth) throw err; return null; });
     },
     // the original was moved or renamed: look for it again and fix the link (edit file gets the new name)
     async relink(e) {
@@ -263,6 +283,21 @@
       }
       return f;
     },
+    // an edit file for an image with the same name whose last saved image is exactly this one, and which no
+    // longer has an image at its own path (= the image was moved). Saving then renames it to the new path.
+    async adoptProject(entry) {
+      const b = this.backend, own = this.projNameFor(entry), tail = safe(entry.name) + EXT;
+      const cands = [...this.projects.values()].filter(p => p.name !== own && (p.name.endsWith(SEP + tail) || p.name.endsWith('__' + entry.name + EXT) || p.name === tail));
+      if (!cands.length) return null;
+      const hash = await U.hash(await b.read(entry));
+      for (const p of cands) {
+        const im = (await App.project.readHeader(await b.read(p))).image || {};
+        if (im.hash !== hash) continue;
+        if (im.rel && await this.resolveRel(im.rel).catch(() => null)) continue; // its own image is still there: a copy
+        return p;
+      }
+      return null;
+    },
     // breadth-first search for image files with this name below the base folder (skips _ and . folders)
     async findUnderRoot(name, limit = 4000) {
       const b = this.backend, out = [], queue = [Object.assign({}, this.root, { rel: [] })];
@@ -270,6 +305,16 @@
       while (queue.length && seen < limit) {
         const d = queue.shift();
         seen++;
+        if (d.handle && b.kind !== 'drive') {
+          // on this PC: only look at names (reading every file's details on a Drive-synced disk is slow)
+          try {
+            for await (const h of d.handle.values()) {
+              if (h.kind === 'directory') { if (!/^[._]/.test(h.name)) queue.push({ kind: 'dir', name: h.name, handle: h, path: d.path + '/' + h.name, rel: [...d.rel, h.name] }); }
+              else if (h.name === name) out.push(Object.assign(await b.fileEntry(h, d), { dir: d, rel: [...d.rel, h.name] }));
+            }
+          } catch { /* unreadable folder */ }
+          continue;
+        }
         let items;
         try { items = await b.list(d); } catch { continue; }
         for (const it of items) {
@@ -292,6 +337,8 @@
       }
       const b = this.backend, dir = entry.dir;
       const ctx = { backend: b, dir, image: entry, name: entry.name, project: proj || this.projectOf(entry) };
+      // no edit file under this path: maybe the image was moved here and its edit file still has the old path
+      if (!ctx.project) ctx.project = await this.adoptProject(entry).catch(() => null);
       if (!ctx.project && dir.key) {
         // edit file left by an older version inside the image's own folder
         const old = await b.findDir(dir, EDIT_DIR, false).catch(() => null);
