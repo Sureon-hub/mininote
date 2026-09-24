@@ -34,7 +34,7 @@
     // shown on the gallery (main screen); same keys may mean something else in the editor
     ['갤러리 (메인 화면)', [
       ['gallery.refresh', '새로고침', ['ctrl+r', 'f5']], ['gallery.selectAll', '전체 선택', ['ctrl+a']],
-      ['gallery.delete', '선택한 노트를 휴지통으로', ['delete']], ['gallery.deleteProj', '선택한 노트의 편집파일만 삭제', ['shift+delete']],
+      ['gallery.delete', '선택한 노트를 휴지통으로', ['delete']], ['gallery.deleteProj', '선택한 노트 삭제 (새 노트는 원본까지 지울지 물어봄)', ['shift+delete']],
       ['gallery.new', '새 노트', ['n']], ['gallery.openImage', '이미지 열기', ['o']],
     ]],
   ];

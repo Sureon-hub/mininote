@@ -81,7 +81,7 @@
         h('div', { class: 'grow' }),
         h('button', { class: 'btn small', onclick: () => this.selectAll() }, all ? '전체 해제' : '전체 선택'),
         n === 1 && U.iconBtn('more', '더보기 (이름 바꾸기·폴더 열기·정보)', e => { const t = this.tileOf(items[0]); if (t) { const r = e.currentTarget.getBoundingClientRect(); this.tileMenu(t, r.right - 220, r.bottom + 4); } }),
-        withProj > 0 && h('button', { class: 'btn small', title: '원본 이미지는 그대로 두고 편집 기록만 지워요', onclick: () => this.bulkDelete('proj') }, `편집파일 삭제${withProj !== n ? ` (${withProj})` : ''}`),
+        withProj > 0 && h('button', { class: 'btn small', title: '편집 기록을 지워요 ("새 노트"의 노트는 원본까지 지울지 물어봐요)', onclick: () => this.bulkDelete('proj') }, `삭제${withProj !== n ? ` (${withProj})` : ''}`),
         images > 0 && h('button', { class: 'btn small danger', title: '이미지와 편집파일을 휴지통으로', onclick: () => this.bulkDelete('trash') }, `휴지통${images !== n ? ` (${images})` : ''}`),
       ].filter(Boolean));
     }
@@ -117,10 +117,11 @@
         const inNew = (await Promise.all(withProj.map(e => this.newNoteImage(e)))).filter(Boolean).length;
         this.setBusy(false);
         const v = await U.dialog({
-          title: `편집파일 ${withProj.length}개를 삭제할까요?`,
-          body: '레이어 편집 기록을 지워요.' + (inNew ? `\n그중 ${inNew}개는 원본 이미지가 "새 노트" 폴더에 있어요 (앱에서 만들거나 가져온 노트). 원본도 함께 지울 수 있어요.` : ' 원본 이미지는 그대로 남아요.'),
-          buttons: [{ label: '취소', value: null }, { label: inNew ? '편집파일만 삭제' : '편집파일 삭제', value: 'proj', danger: !inNew, primary: !inNew },
-            inNew && { label: `새 노트 원본 ${inNew}개도 함께 삭제`, value: 'both', danger: true, primary: true }].filter(Boolean),
+          title: `${withProj.length}개를 삭제할까요?`,
+          body: !inNew ? '편집 기록을 지워요. 원본 이미지는 다른 폴더에 있어서 그대로 남아요.'
+            : `그중 ${inNew}개는 원본 이미지가 "새 노트" 폴더에 있어요 (앱에서 만들거나 가져온 노트). 원본까지 지울지 골라 주세요.` + (inNew < withProj.length ? `\n나머지 ${withProj.length - inNew}개는 원본이 다른 폴더에 있어서 편집 기록만 지워요.` : ''),
+          buttons: [{ label: '취소', value: null }, { label: inNew ? '편집파일만 삭제' : '삭제', value: 'proj', danger: !inNew, primary: !inNew },
+            inNew && { label: '원본까지 삭제', value: 'both', danger: true, primary: true }].filter(Boolean),
         });
         if (!v) return;
         this.setBusy(true);
@@ -444,7 +445,7 @@
         !entry.edited && { label: '이름 바꾸기', value: 'rename' },
         { label: '정보', value: 'info' },
         '-',
-        proj && { label: '편집파일만 삭제 (원본 이미지는 그대로)', value: 'delproj', danger: true },
+        proj && { label: '삭제', value: 'delproj', danger: true },
         !entry.edited && { label: `이미지와 편집파일을 ${L.backend.trashToFolder ? '휴지통 폴더로' : 'Drive 휴지통으로'}`, value: 'trash', danger: true },
       ], x, y);
       try {
@@ -454,10 +455,10 @@
         else if (v === 'delproj') {
           const inNew = await this.newNoteImage(entry);
           const v2 = await U.dialog({
-            title: '편집파일을 삭제할까요?',
-            body: `"${entry.name}"의 레이어 편집 기록을 지워요.` + (inNew ? '\n원본 이미지가 "새 노트" 폴더에 있어요 (앱에서 만들거나 가져온 노트). 원본도 함께 지울 수 있어요.' : ' 원본 이미지는 그대로 남아요.'),
-            buttons: [{ label: '취소', value: null }, { label: inNew ? '편집파일만 삭제' : '편집파일 삭제', value: 'proj', danger: !inNew, primary: !inNew },
-              inNew && { label: '원본 이미지도 함께 삭제', value: 'both', danger: true, primary: true }].filter(Boolean),
+            title: `"${entry.name}"을(를) 삭제할까요?`,
+            body: inNew ? '원본 이미지가 "새 노트" 폴더에 있어요 (앱에서 만들거나 가져온 노트). 원본까지 지울지 골라 주세요.' : '편집 기록을 지워요. 원본 이미지는 다른 폴더에 있어서 그대로 남아요.',
+            buttons: [{ label: '취소', value: null }, { label: inNew ? '편집파일만 삭제' : '삭제', value: 'proj', danger: !inNew, primary: !inNew },
+              inNew && { label: '원본까지 삭제', value: 'both', danger: true, primary: true }].filter(Boolean),
           });
           if (v2) {
             const r = await this.deleteEdits([entry], v2 === 'both');
