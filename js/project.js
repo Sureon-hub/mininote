@@ -387,8 +387,9 @@
 
       const projName = this.projNameFor(ctx.image);
       // an older-style name for the same image → rename it instead of leaving a duplicate
-      if (ctx.project && ctx.project.name !== projName && this.projects.get(ctx.project.name) === ctx.project && !this.projects.has(projName)) {
-        const np = await b.rename(this.appDir, ctx.project, projName);
+      // (compared by name: a gallery refresh meanwhile replaces the entries in this.projects)
+      if (ctx.project && ctx.project.name !== projName && this.projects.has(ctx.project.name) && !this.projects.has(projName)) {
+        const np = await b.rename(this.appDir, this.projects.get(ctx.project.name), projName);
         this.projects.delete(ctx.project.name);
         ctx.project = np;
       }

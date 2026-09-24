@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.9.5';
+  App.VERSION = '0.9.6';
 
   // ---------------- screens ----------------
   App.show = name => {
