@@ -373,6 +373,12 @@
       }
       const imgBlob = await U.canvasToBlob(out, mime, mime === 'image/png' ? undefined : App.settings.jpegQuality);
       const hash = await U.hash(imgBlob);
+      // on this PC the original may have been moved since it was opened: writing to the old handle would
+      // bring it back to the old place, so find where it went first (Drive files follow moves by id)
+      let moved = false;
+      if (ctx.image && ctx.image.handle && b.kind !== 'drive' && await ctx.image.handle.getFile().then(() => false, e => e.name === 'NotFoundError')) {
+        moved = await this.followMoved(ctx);
+      }
 
       const written = await b.write(ctx.dir, ctx.name, imgBlob, ctx.image);
       const isNew = !ctx.image;
@@ -402,7 +408,38 @@
         this.sort();
       }
       App.gallery?.putThumb(ctx.image, flat);
+      if (moved) App.gallery?.reload?.();
       return ctx.image;
+    },
+    // the original isn't where it was: look for it below the base folder (same name, same content as the last
+    // save); otherwise ask where to save. Returns true when ctx now points somewhere else.
+    async followMoved(ctx) {
+      const b = ctx.backend, old = ctx.image;
+      let f = null;
+      if (this.root && this.root.handle) {
+        let hash = null;
+        if (ctx.project) try { hash = ((await App.project.readHeader(await b.read(ctx.project))).image || {}).hash; } catch { /* ignore */ }
+        const cands = await this.findUnderRoot(old.name);
+        if (hash) for (const c of cands) { if ((await U.hash(await b.read(c))) === hash) { f = c; break; } }
+        if (!f && cands.length === 1) f = cands[0];
+      }
+      if (f) {
+        this.images = this.images.filter(e => e !== old);
+        ctx.image = f; ctx.dir = f.dir;
+        U.toast(`"${f.name}"이(가) 옮겨진 곳(${f.rel.slice(0, -1).join(' › ') || f.dir.name})을 찾아서 그 자리에 저장했어요`);
+        return true;
+      }
+      const target = this.folderByKey(App.settings.newNoteFolder) || this.folders[0];
+      const choice = await U.dialog({
+        title: '원본 이미지가 원래 자리에 없어요',
+        body: `"${old.name}"이(가) 옮겨졌거나 지워졌어요${this.root ? ` ("${this.root.name}" 안에서도 찾지 못했어요)` : ''}.\n어디에 저장할까요?`,
+        buttons: [{ label: '원래 자리에 다시 만들기', value: 'old' }, { label: `"${target.name}"에 저장`, value: 'new', primary: true }],
+      });
+      if (choice !== 'new') return false;
+      this.images = this.images.filter(e => e !== old);
+      ctx.dir = target; ctx.image = null;
+      ctx.name = await this.freeName(b, target, old.name);
+      return true;
     },
 
     // -------- manage --------
