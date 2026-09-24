@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.9.9';
+  App.VERSION = '0.9.10';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -766,6 +766,15 @@
       if (declined) return;
     }
     App.receiveImages(await filesP);
+  });
+  // coming back to the app (e.g. after saving on the other device): forget preloaded notes and refresh the list
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !App.library.backend) return;
+    App.editor.cache?.clear();
+    if (!U.$('#gallery').hidden && !App.gallery.selecting && Date.now() - (App._lastReload || 0) > 20000) {
+      App._lastReload = Date.now();
+      Promise.resolve(App.gallery.reload()).catch(() => {});
+    }
   });
   // "공유" from the phone's gallery: the service worker stores the files and reopens the app with ?share=N
   async function takeSharedImages() {

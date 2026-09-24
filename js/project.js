@@ -396,6 +396,30 @@
       return out;
     },
 
+    // re-read the edit file until it belongs to this image (hash), for up to ~1 minute; the user can stop waiting
+    async waitForProject(p, imgHash) {
+      const b = this.backend;
+      let stop = false;
+      const back = U.h('div', { class: 'modal-back' },
+        U.h('div', { class: 'modal' },
+          U.h('h3', null, '최신 편집 내용을 받는 중…'),
+          U.h('p', null, '다른 기기에서 저장한 편집파일이 구글 드라이브로 올라오는 중이에요. 도착하면 바로 열어요.'),
+          U.h('div', { class: 'modal-btns' }, U.h('button', { class: 'btn', onclick: () => { stop = true; } }, '기다리지 않기'))));
+      document.body.append(back);
+      try {
+        for (let i = 0; i < 30 && !stop; i++) {
+          await new Promise(r => { const t = setTimeout(r, i ? 2000 : 300); const iv = setInterval(() => { if (stop) { clearTimeout(t); clearInterval(iv); r(); } }, 100); setTimeout(() => clearInterval(iv), 2100); });
+          if (stop) break;
+          const cur = (b.kind === 'drive' ? await b.fileById(p.id).catch(() => null) : null) || p;
+          const blob = await b.read(cur).catch(() => null);
+          if (!blob) continue;
+          const head = await App.project.readHeader(blob).catch(() => null);
+          if (head && head.image && head.image.hash === imgHash) return App.project.decode(blob);
+        }
+        return null;
+      } finally { back.remove(); }
+    },
+
     // -------- open --------
     // opts.quiet: used for background preloading – never shows a dialog, returns null instead
     async open(entry, opts = {}) {
@@ -426,16 +450,27 @@
           if (maybeChanged) {
             if (opts.quiet) return null;
             const imgBlob = await b.read(entry);
-            if ((await U.hash(imgBlob)) !== im.hash) {
-              const choice = await U.dialog({
-                title: '원본 이미지가 바뀌었어요',
-                body: `"${entry.name}"이(가) 편집파일을 마지막으로 저장한 뒤에 다른 곳에서 수정되었습니다. 어떻게 열까요?`,
+            const imgHash = await U.hash(imgBlob);
+            // the image is newer than the edit file: usually the other device saved both and the (much bigger)
+            // edit file is still on its way through Google Drive → wait for it and open the newest version.
+            // (edit file newer than the image = the image is the one still syncing → just open the edit file)
+            const imageNewer = !data.header.savedAt || !entry.mtime || entry.mtime > data.header.savedAt + 3000;
+            let choice = imgHash === im.hash || !imageNewer ? 'project' : 'wait';
+            while (choice === 'wait') {
+              const fresh = await this.waitForProject(ctx.project, imgHash);
+              if (fresh) { data = fresh; choice = 'project'; U.toast('다른 기기에서 저장한 최신 편집 내용으로 열었어요'); break; }
+              choice = await U.dialog({
+                title: '원본 이미지가 편집파일보다 새로워요',
+                body: `"${entry.name}"이(가) 편집파일을 마지막으로 저장한 뒤에 바뀌었어요.\n• 다른 기기에서 미니수첩으로 저장했다면: 편집파일이 아직 구글 드라이브로 올라가는 중이에요. "다시 기다리기"를 눌러 주세요.\n• 다른 앱에서 이미지를 고쳤다면: 아래에서 고르세요.`,
                 buttons: [
-                  { label: '원본을 새 레이어로 추가', value: 'layer', primary: true },
+                  { label: '다시 기다리기', value: 'wait', primary: true },
+                  { label: '원본을 새 레이어로 추가', value: 'layer' },
                   { label: '원본 이미지로 새로 시작', value: 'image' },
                   { label: '편집파일 그대로', value: 'project' },
                 ],
               });
+            }
+            {
               if (choice === 'image') return { doc: await docFromImageBlob(imgBlob), ctx };
               if (choice === 'layer') {
                 const bmp = await createImageBitmap(imgBlob);
