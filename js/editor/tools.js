@@ -25,7 +25,7 @@
       this.lastP = pt.p;
       this.stroke.add(this.sm.x, this.sm.y, pt.p);
     }
-    frame() { this.stroke?.flush(); }
+    frame() { if (this.stroke) this.ed.scheduleFlush(this.stroke); }
     up(pt) {
       if (!this.stroke) return;
       // let the smoothed point catch up with the pen

@@ -84,41 +84,71 @@
 
   App.brush = { tip, tinted, grainCanvas, grainValues: () => grainBase || (grainBase = makeGrainBase()) };
 
+  // Coverage -> alpha through the paper grain. Mid coverage is boosted so normal pressure stays dense;
+  // only the thin edges and very light pressure turn grainy.
+  function grainPass(img, x, y, G, s) {
+    const d = img.data, w = img.width, h = img.height;
+    for (let yy = 0; yy < h; yy++) {
+      const gy = ((y + yy) & 255) << 8;
+      let i = yy * w * 4 + 3;
+      for (let xx = 0; xx < w; xx++, i += 4) {
+        const c = d[i];
+        if (!c) continue;
+        const cv = 1 - c / 255, cb = 1 - cv * cv;
+        const t = (1 - G[gy | ((x + xx) & 255)]) * s;
+        const a = (cb - t) / (1.001 - t);
+        d[i] = a <= 0 ? 0 : a >= 1 ? 255 : a * 255;
+      }
+    }
+  }
+
   // ---------------- a single stroke ----------------
   class Stroke {
     constructor(ed, preset, erase, color) {
       this.ed = ed;
       const doc = this.doc = ed.doc;
-      this.L = doc.active;
+      const L = this.L = doc.active;
       this.p = preset;
       this.erase = erase;
       this.P = App.settings.pressure;
       const bufs = ed.buffers();
-      this.buf = bufs.stroke; this.bctx = bufs.strokeCtx;
-      this.mbuf = bufs.masked; this.mctx = bufs.maskedCtx;
+      this.bctx = bufs.strokeCtx;
+      this.mbuf = bufs.masked; this.mctx = bufs.maskedCtx; this.buf = bufs.stroke;
       this.tip = tinted(erase ? '#000000' : color, preset.hardness);
-      this.spacing = U.clamp(preset.spacing || 0.06, 0.02, 1);
+      this.spacing = U.clamp(preset.spacing || 0.06, 0.01, 1);
       // ~number of stamps whose solid core covers a pixel on the centre line
       this.n = Math.max(1, Math.max(0.2, preset.hardness) * 0.8 / this.spacing);
       this.dirty = null; this.pending = null; this.last = null; this.acc = 0;
-      // textured brush: grain is fixed to the paper and only eats into the thin (low-coverage) parts,
-      // so the core of a stroke stays dense and the edges / light pressure turn grainy (cream-pencil look)
-      if (preset.grain > 0.01) this.grain = App.brush.grainValues();
-      const L = this.L;
-      doc.preview = {
-        layer: L,
-        apply: (sc, r) => {
-          sc.globalAlpha = preset.opacity;
-          sc.globalCompositeOperation = erase ? 'destination-out' : L.alphaLock ? 'source-atop' : 'source-over';
-          sc.drawImage(this.mbuf, r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0, r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
-        },
-      };
+      // textured brush: grain is fixed to the paper (cream-pencil look)
+      this.grain = preset.grain > 0.01 ? App.brush.grainValues() : null;
+      // outline ("테두리"): a wider stamp in the outline colour, placed *behind* the layer's existing pixels
+      const O = preset.outline;
+      this.outline = !erase && O && O.on && O.width > 0 && !L.alphaLock ? O : null;
+      if (this.outline) {
+        const ob = ed.buffers('outline');
+        this.octx = ob.strokeCtx; this.obuf = ob.stroke; this.ombuf = ob.masked; this.omctx = ob.maskedCtx;
+        this.otip = tinted(O.color, U.lerp(preset.hardness, 0.92, O.smooth));
+        this.ograin = this.grain ? preset.grain * (1 - O.smooth) : 0;
+      }
+      doc.preview = { layer: L, apply: (sc, r) => this.draw(sc, r) };
+    }
+    draw(c, r) {
+      const w = r.x1 - r.x0, h = r.y1 - r.y0;
+      c.globalAlpha = this.p.opacity;
+      if (this.outline) {
+        c.globalCompositeOperation = 'destination-over';
+        c.drawImage(this.ombuf, r.x0, r.y0, w, h, r.x0, r.y0, w, h);
+      }
+      c.globalCompositeOperation = this.erase ? 'destination-out' : this.L.alphaLock ? 'source-atop' : 'source-over';
+      c.drawImage(this.mbuf, r.x0, r.y0, w, h, r.x0, r.y0, w, h);
     }
     curve(p) { return Math.pow(U.clamp(p, 0, 1), this.P.gamma); }
     sizeAt(p) { return Math.max(0.5, this.p.size * (this.P.size ? U.lerp(this.P.minSize, 1, this.curve(p)) : 1)); }
     alphaAt(p) {
       let a = this.p.flow;
-      if (this.P.opacity || this.p.pFlow) a *= U.lerp(this.P.minOpacity, 1, this.curve(p));
+      const c = this.curve(p);
+      if (this.p.pFlow) a *= U.lerp(this.p.pFlowMin ?? 0.6, 1, c);
+      if (this.P.opacity) a *= U.lerp(this.P.minOpacity, 1, c);
       return 1 - Math.pow(1 - U.clamp(a, 0, 1), 1 / this.n);
     }
     stamp(x, y, p) {
@@ -128,6 +158,11 @@
       const c = this.bctx;
       c.globalAlpha = a;
       c.drawImage(this.tip, x - d / 2, y - d / 2, d, d);
+      if (this.outline) {
+        d = s + this.outline.width * 2;
+        this.octx.globalAlpha = 1;
+        this.octx.drawImage(this.otip, x - d / 2, y - d / 2, d, d);
+      }
       this.pending = U.rUnion(this.pending, { x0: x - d / 2 - 1, y0: y - d / 2 - 1, x1: x + d / 2 + 1, y1: y + d / 2 + 1 });
     }
     add(x, y, p) {
@@ -146,41 +181,33 @@
       }
       this.last = { x, y, p };
     }
-    // push pending stamps through grain + selection into the masked buffer
-    flush() {
-      const doc = this.doc;
-      const r = U.rClamp(this.pending, doc.w, doc.h, 1);
-      this.pending = null;
-      if (!r) return;
+    // coverage buffer -> masked buffer (grain + selection) for rect r
+    pass(srcCanvas, srcCtx, dstCtx, grainS, r) {
       const x = r.x0, y = r.y0, w = r.x1 - r.x0, h = r.y1 - r.y0;
-      const m = this.mctx;
+      const m = dstCtx, sel = this.doc.selection;
       m.save();
       // destination-in is an "unbounded" operator: without a clip it would wipe the rest of the buffer
       m.beginPath(); m.rect(x, y, w, h); m.clip();
       m.globalAlpha = 1;
       m.globalCompositeOperation = 'source-over';
-      if (this.grain) {
-        // alpha = coverage pushed through a per-pixel threshold taken from the grain
-        const img = this.bctx.getImageData(x, y, w, h), d = img.data, G = this.grain, s = this.p.grain;
-        for (let yy = 0; yy < h; yy++) {
-          const gy = ((y + yy) & 255) << 8;
-          let i = yy * w * 4 + 3;
-          for (let xx = 0; xx < w; xx++, i += 4) {
-            const cov = d[i];
-            if (!cov) continue;
-            const t = (1 - G[gy | ((x + xx) & 255)]) * s;
-            const a = (cov / 255 - t) / (1.001 - t);
-            d[i] = a <= 0 ? 0 : a >= 1 ? 255 : a * 255;
-          }
-        }
+      if (grainS > 0.01) {
+        const img = srcCtx.getImageData(x, y, w, h);
+        grainPass(img, x, y, this.grain, grainS);
         m.putImageData(img, x, y);
       } else {
         m.clearRect(x, y, w, h);
-        m.drawImage(this.buf, x, y, w, h, x, y, w, h);
+        m.drawImage(srcCanvas, x, y, w, h, x, y, w, h);
       }
-      m.globalCompositeOperation = 'destination-in';
-      if (doc.selection) m.drawImage(doc.selection.mask, x, y, w, h, x, y, w, h);
+      if (sel) { m.globalCompositeOperation = 'destination-in'; m.drawImage(sel.mask, x, y, w, h, x, y, w, h); }
       m.restore();
+    }
+    flush() {
+      const doc = this.doc;
+      const r = U.rClamp(this.pending, doc.w, doc.h, 1);
+      this.pending = null;
+      if (!r) return;
+      this.pass(this.buf, this.bctx, this.mctx, this.grain ? this.p.grain : 0, r);
+      if (this.outline) this.pass(this.obuf, this.octx, this.omctx, this.ograin, r);
       this.dirty = U.rUnion(this.dirty, r);
       this.ed.requestComposite(r);
     }
@@ -190,12 +217,9 @@
       if (!r) return;
       const w = r.x1 - r.x0, h = r.y1 - r.y0;
       const before = L.ctx.getImageData(r.x0, r.y0, w, h);
-      const c = L.ctx;
-      c.save();
-      c.globalAlpha = this.p.opacity;
-      c.globalCompositeOperation = this.erase ? 'destination-out' : L.alphaLock ? 'source-atop' : 'source-over';
-      c.drawImage(this.mbuf, r.x0, r.y0, w, h, r.x0, r.y0, w, h);
-      c.restore();
+      L.ctx.save();
+      this.draw(L.ctx, r);
+      L.ctx.restore();
       L.rev++;
       this.clear(r);
       this.ed.pushHistory(App.History.pixels(doc, L, r, before, rr => this.ed.changed(rr)));
@@ -209,6 +233,7 @@
       const w = r.x1 - r.x0, h = r.y1 - r.y0;
       this.bctx.clearRect(r.x0, r.y0, w, h);
       this.mctx.clearRect(r.x0, r.y0, w, h);
+      if (this.outline) { this.octx.clearRect(r.x0, r.y0, w, h); this.omctx.clearRect(r.x0, r.y0, w, h); }
     }
   }
   App.Stroke = Stroke;

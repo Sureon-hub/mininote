@@ -180,7 +180,26 @@
         sl('손떨림 보정', 'smoothing', 0, 0.95, 0.01, pct),
         sl('간격', 'spacing', 0.01, 0.5, 0.005, v => (v * 100).toFixed(1) + '%'),
         ui.toggle({ label: '필압 → 농도 (약하게 누르면 흐리고 거칠게)', get: () => !!B.pFlow, set: v => { B.pFlow = v; } }),
+        ui.slider({ label: '약할 때 농도', min: 0.1, max: 1, step: 0.01, get: () => B.pFlowMin ?? 0.6, set: v => { B.pFlowMin = v; }, fmt: pct }),
         h('button', { class: 'btn small', onclick: () => { S.brushes[key] = JSON.parse(JSON.stringify(App.DEFAULTS.brushes[key])); App.saveSettings(); this.render(); ed.onBrushChanged(); } }, '이 브러시 초기화'));
+
+      // outline (테두리)
+      if (!erase) {
+        const O = B.outline || (B.outline = JSON.parse(JSON.stringify(App.DEFAULTS.brushes[key].outline)));
+        const col = h('input', { type: 'color', value: O.color, class: 'ol-color' });
+        col.addEventListener('input', () => { O.color = col.value; });
+        col.addEventListener('change', () => App.saveSettings());
+        const box = h('div', { class: 'ol-box' + (O.on ? '' : ' off') },
+          h('div', { class: 'row ol-row' }, h('span', { class: 'sl-label' }, '테두리 색'), col,
+            ...['#ffffff', '#000000', '#fff6c8'].map(c => h('button', { class: 'sw ol-sw', style: { background: c }, title: c, onclick: () => { O.color = c; col.value = c; App.saveSettings(); } }))),
+          ui.slider({ label: '테두리 굵기', min: 1, max: 40, step: 1, get: () => O.width, set: v => { O.width = v; }, fmt: v => v + 'px' }),
+          ui.slider({ label: '매끈함', min: 0, max: 1, step: 0.01, get: () => O.smooth, set: v => { O.smooth = v; }, fmt: v => (v > 0.95 ? '매끈 ' : v < 0.05 ? '브러시처럼 ' : '') + pct(v) }));
+        kids.push(
+          h('div', { class: 'p-title' }, '테두리'),
+          ui.toggle({ label: '선 주위에 테두리 그리기', get: () => O.on, set: v => { O.on = v; box.classList.toggle('off', !v); } }),
+          box,
+          h('p', { class: 'hint' }, '테두리는 이미 그린 선 뒤로 들어가서, 선이 겹쳐도 앞의 글씨를 가리지 않아요. 이미지 위에 쓸 때는 이미지 레이어 위의 빈 레이어에 쓰세요 (이미지를 열면 자동으로 만들어져요).'));
+      }
 
       // pressure
       const P = S.pressure;

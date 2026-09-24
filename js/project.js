@@ -59,8 +59,10 @@
     const L = doc.createLayer('배경');
     L.ctx.drawImage(bmp, 0, 0);
     bmp.close?.();
-    doc.layers.push(L);
-    doc.active = L;
+    // draw on an empty layer above the image, so the original stays untouched (and outlines can sit behind strokes)
+    const L1 = doc.createLayer('레이어 1');
+    doc.layers.push(L, L1);
+    doc.active = L1;
     return doc;
   }
 

@@ -274,14 +274,18 @@
       if (this.toolName === 'transform') this.setTool('brush');
       if (doc.w * doc.h > 25e6) U.toast('큰 이미지라 느릴 수 있어요');
     }
-    buffers() {
+    // stroke work buffers (kind: 'main' | 'outline'), reallocated when the document size changes
+    buffers(kind = 'main') {
       const d = this.doc;
-      if (!this.bufs || this.bufs.w !== d.w || this.bufs.h !== d.h) {
+      if (!this.bufs || this.bufs.w !== d.w || this.bufs.h !== d.h) this.bufs = { w: d.w, h: d.h };
+      if (!this.bufs[kind]) {
         const stroke = U.canvas(d.w, d.h), masked = U.canvas(d.w, d.h);
-        this.bufs = { w: d.w, h: d.h, stroke, masked, strokeCtx: stroke.getContext('2d', { willReadFrequently: true }), maskedCtx: masked.getContext('2d') };
+        this.bufs[kind] = { stroke, masked, strokeCtx: stroke.getContext('2d', { willReadFrequently: true }), maskedCtx: masked.getContext('2d') };
       }
-      return this.bufs;
+      return this.bufs[kind];
     }
+    // brush strokes are pushed through grain/selection once per animation frame, not per pointer event
+    scheduleFlush(stroke) { this.pendingFlush = stroke; this.requestRender(); }
     async leaveGuard() {
       if (!this.doc) return true;
       if (this.action) this.cancelAction(true);
@@ -610,7 +614,8 @@
     }
     requestRender() {
       if (this.raf) return;
-      this.raf = requestAnimationFrame(() => { this.raf = 0; this.render(); });
+      // raf stays set while rendering so requests made during render() don't queue an extra frame
+      this.raf = requestAnimationFrame(() => { try { this.render(); } finally { this.raf = 0; } });
     }
     checker() {
       if (!this._checker) {
@@ -626,15 +631,15 @@
       c.setTransform(1, 0, 0, 1, 0, 0);
       c.clearRect(0, 0, this.canvas.width, this.canvas.height);
       if (!doc) return;
+      if (this.pendingFlush) { const s = this.pendingFlush; this.pendingFlush = null; s.flush(); }
       if (this.compAll) doc.renderComposite(null);
       else if (this.compRect) doc.renderComposite(this.compRect);
       this.compAll = false; this.compRect = null;
 
       const z = this.z * dpr, x = this.ox * dpr, y = this.oy * dpr, w = doc.w * z, hh = doc.h * z;
-      c.save();
-      c.shadowColor = 'rgba(0,0,0,.28)'; c.shadowBlur = 14 * dpr; c.shadowOffsetY = 2 * dpr;
-      c.fillStyle = '#fff'; c.fillRect(x, y, w, hh);
-      c.restore();
+      // cheap page edge (shadowBlur is costly on phones at high DPR and this runs every frame)
+      c.fillStyle = 'rgba(0,0,0,.22)';
+      c.fillRect(x - dpr, y - dpr, w + 2 * dpr, hh + 3 * dpr);
       c.save();
       c.beginPath(); c.rect(x, y, w, hh); c.clip();
       c.fillStyle = this.checker(); c.fillRect(x, y, w, hh);
