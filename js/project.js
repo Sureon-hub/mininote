@@ -218,7 +218,8 @@
       let f = null;
       if (e.rel) f = await this.resolveRel(e.rel).catch(() => null);
       if (!f && e.external) f = await this.externalEntry(e.project.name, interactive);
-      if (!f) f = await this.relinkOnce(e);
+      // on this PC a search can take a while, so it only runs when the note is actually opened (not for thumbnails)
+      if (!f && (interactive || this.backend.kind === 'drive')) f = await this.relinkOnce(e);
       if (f) { e.entry = f; e.mtime = f.mtime; e.size = f.size; e.missing = false; } else e.missing = true;
       return f;
     },
@@ -267,9 +268,7 @@
           f.rel = rel ? [...rel, f.name] : null;
         }
       } else if (this.root && this.root.handle) {
-        const cands = await this.findUnderRoot(im.name || e.name);
-        if (im.hash) for (const c of cands) { if ((await U.hash(await b.read(c))) === im.hash) { f = c; break; } }
-        if (!f && cands.length === 1) f = cands[0];
+        f = await this.locate(im.name || e.name, im.hash, im.rel);
       }
       if (!f) return null;
       e.rel = this.relOf(f);
@@ -298,8 +297,76 @@
       }
       return null;
     },
-    // breadth-first search for image files with this name below the base folder (skips _ and . folders)
-    async findUnderRoot(name, limit = 4000) {
+    // ---- finding a moved original on this PC (fastest first) ----
+    //  1. direct look-ups in likely folders: recently used ones, the collection's folders, the folders around
+    //     the old place and the top folders of the base folder
+    //  2. Google Drive's own search, when this PC is logged in to Google (instant; path → local file)
+    //  3. last resort: walk every folder below the base folder, stopping at the first file with the same content
+    async locate(name, hash, oldRel) {
+      const b = this.backend;
+      const same = async c => !hash || (await U.hash(await b.read(c))) === hash;
+      const dirs = [], seen = new Set();
+      const add = r => { if (r && !seen.has(r.join('/'))) { seen.add(r.join('/')); dirs.push(r); } };
+      for (const r of App.settings.recentDirs || []) add(r);
+      for (const f of this.folders) add(f.rel);
+      const around = [];
+      if (oldRel) for (let i = oldRel.length - 2; i >= 0; i--) around.push(oldRel.slice(0, i));
+      if (!around.length) around.push([]);
+      for (const r of around) {
+        add(r);
+        const d = await this.dirAtRel(r);
+        if (d) try { for await (const h of d.handle.values()) if (h.kind === 'directory' && !/^[._]/.test(h.name)) add([...r, h.name]); } catch { /* ignore */ }
+      }
+      let loose = null;
+      for (const r of dirs) {
+        const d = await this.dirAtRel(r);
+        const c = d && await b.find(d, name);
+        if (!c) continue;
+        Object.assign(c, { dir: d, rel: [...r, name] });
+        if (await same(c)) return c;
+        loose = loose || c;
+      }
+      if (App.settings.driveClientId && App.driveAuth && App.driveAuth.valid()) {
+        try {
+          const g = new App.DriveBackend({ id: 'root', name: '내 드라이브' });
+          for (const x of await g.searchImages(name)) {
+            const rel = x.parentId && await g.pathFromRoot(x.parentId);
+            const c = rel && await this.resolveRel([...rel, name]).catch(() => null);
+            if (c && await same(c)) return c;
+          }
+        } catch (err) { console.warn(err); }
+      }
+      U.toast('옮겨진 원본을 찾는 중이에요… (폴더가 많으면 조금 걸려요)');
+      const cands = await this.findUnderRoot(name, same);
+      return cands.find(c => c.exact) || (cands.length === 1 ? cands[0] : loose);
+    },
+    // a folder below the base folder by its path (null if it isn't there)
+    async dirAtRel(rel) {
+      if (!this.root) return null;
+      let d = Object.assign({}, this.root, { rel: [] });
+      for (let i = 0; i < rel.length; i++) {
+        const key = rel.slice(0, i + 1).join('/');
+        let n = this._dirs.get(key);
+        if (!n) {
+          n = await this.backend.findDir(d, rel[i], false).catch(() => null);
+          if (!n) return null;
+          n.rel = rel.slice(0, i + 1);
+          this._dirs.set(key, n);
+        }
+        d = n;
+      }
+      return d;
+    },
+    rememberDir(rel) {
+      if (!rel || !this.root) return;
+      const S = App.settings, k = rel.join('/');
+      if (S.recentDirs && S.recentDirs[0] && S.recentDirs[0].join('/') === k) return;
+      S.recentDirs = [rel, ...(S.recentDirs || []).filter(r => r.join('/') !== k)].slice(0, 20);
+      App.saveSettings();
+    },
+    // breadth-first search for image files with this name below the base folder (skips _ and . folders);
+    // `accept` (optional) ends the search at the first file it approves (marked .exact)
+    async findUnderRoot(name, accept, limit = 4000) {
       const b = this.backend, out = [], queue = [Object.assign({}, this.root, { rel: [] })];
       let seen = 0;
       while (queue.length && seen < limit) {
@@ -310,7 +377,11 @@
           try {
             for await (const h of d.handle.values()) {
               if (h.kind === 'directory') { if (!/^[._]/.test(h.name)) queue.push({ kind: 'dir', name: h.name, handle: h, path: d.path + '/' + h.name, rel: [...d.rel, h.name] }); }
-              else if (h.name === name) out.push(Object.assign(await b.fileEntry(h, d), { dir: d, rel: [...d.rel, h.name] }));
+              else if (h.name === name) {
+                const c = Object.assign(await b.fileEntry(h, d), { dir: d, rel: [...d.rel, h.name] });
+                if (accept && await accept(c)) { c.exact = true; return [c]; }
+                out.push(c);
+              }
             }
           } catch { /* unreadable folder */ }
           continue;
@@ -337,6 +408,7 @@
       }
       const b = this.backend, dir = entry.dir;
       const ctx = { backend: b, dir, image: entry, name: entry.name, project: proj || this.projectOf(entry) };
+      if (!opts.quiet) this.rememberDir(dir.rel);
       // no edit file under this path: maybe the image was moved here and its edit file still has the old path
       if (!ctx.project) ctx.project = await this.adoptProject(entry).catch(() => null);
       if (!ctx.project && dir.key) {
@@ -428,6 +500,7 @@
       }
 
       const written = await b.write(ctx.dir, ctx.name, imgBlob, ctx.image);
+      this.rememberDir(ctx.dir.rel);
       const isNew = !ctx.image;
       const rel = ctx.dir.rel ? [...ctx.dir.rel, ctx.name] : (ctx.image && ctx.image.rel) || null;
       if (ctx.image) Object.assign(ctx.image, written, { rel }); else ctx.image = Object.assign(written, { dir: ctx.dir, rel });
@@ -467,9 +540,7 @@
       if (this.root && this.root.handle) {
         let hash = null;
         if (ctx.project) try { hash = ((await App.project.readHeader(await b.read(ctx.project))).image || {}).hash; } catch { /* ignore */ }
-        const cands = await this.findUnderRoot(old.name);
-        if (hash) for (const c of cands) { if ((await U.hash(await b.read(c))) === hash) { f = c; break; } }
-        if (!f && cands.length === 1) f = cands[0];
+        f = await this.locate(old.name, hash, old.rel || (ctx.dir && ctx.dir.rel ? [...ctx.dir.rel, old.name] : null));
       }
       if (f) {
         this.images = this.images.filter(e => e !== old);
