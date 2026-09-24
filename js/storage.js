@@ -98,11 +98,14 @@
       const id = (App.settings.driveClientId || '').trim();
       if (!id) throw new Error('설정에서 Google OAuth Client ID를 먼저 입력하세요');
       if (!this.ready()) throw new Error('Google 로그인 준비 중입니다. 잠시 후 다시 눌러주세요');
-      if (this.client && this.clientId === id) return;
-      this.clientId = id;
+      // the account used last time: Google can then skip the account chooser and close its window by itself
+      const hint = App.settings.driveEmail || '';
+      if (this.client && this.clientId === id && this.hint === hint) return;
+      this.clientId = id; this.hint = hint;
       this.client = google.accounts.oauth2.initTokenClient({
         client_id: id,
         scope: 'https://www.googleapis.com/auth/drive',
+        ...(hint ? { hint } : {}),
         callback: r => this._done(r),
         error_callback: e => this._fail(e),
       });
@@ -152,6 +155,8 @@
       return true;
     }
     async api(url, opts = {}) {
+      // a login started by a tap is on its way: wait for it instead of failing
+      if (!auth.valid(0) && auth.pending) await auth.pending.promise.catch(() => {});
       if (!auth.valid(0)) throw new AuthError();
       const r = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + auth.token } });
       if (r.status === 401) { auth.token = null; throw new AuthError(); }
@@ -247,6 +252,11 @@
       return j;
     }
     forget(id) { this._meta?.delete(id); }
+    // the signed-in account (used as a login hint next time)
+    async email() {
+      const j = await (await this.api(`${API}/about?fields=user(emailAddress)`)).json();
+      return (j.user && j.user.emailAddress) || '';
+    }
     // folder names from My Drive down to the folder `id` ([] = My Drive itself, null = not inside My Drive)
     async pathFromRoot(id) {
       const rid = await this.rootId(), names = [];

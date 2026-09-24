@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.9.18';
+  App.VERSION = '0.9.19';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -253,8 +253,60 @@
     if (!S.newNoteFolder || !folders.some(f => f.key === S.newNoteFolder)) S.newNoteFolder = 'D' + st.notes.id;
     S.source = 'drive'; App.saveSettings();
     await enterGallery();
+    if (!S.driveEmail) b.email().then(m => { S.driveEmail = m; App.saveSettings(); }).catch(() => {});
     return true;
   }
+  // ---- Google Drive without waiting for the login ----
+  // Google gives a browser app a pass for only one hour, and a new one needs a tap (it opens a small window).
+  // So the gallery opens right away from the list saved last time, and the first tap anywhere quietly fetches a
+  // new pass (the window closes by itself); anything that needs Drive waits for it.
+  const pick = (o, ks) => Object.fromEntries(ks.filter(k => o[k] !== undefined).map(k => [k, o[k]]));
+  App.onLibraryRefreshed = () => {
+    const L = App.library;
+    if (!L.backend || L.backend.kind !== 'drive' || !L.appDir) return;
+    const dirKs = ['kind', 'id', 'name', 'key', 'rel'], fileKs = ['kind', 'id', 'name', 'mtime', 'size', 'mime'];
+    U.idbSet('kv', 'driveCache', {
+      folders: L.folders.map(f => pick(f, dirKs)),
+      appDir: pick(L.appDir, dirKs),
+      images: L.images.map(e => ({ ...pick(e, fileKs), dir: e.dir.key })),
+      projects: [...L.projects.values()].map(p => pick(p, fileKs)),
+    }).catch(() => {});
+  };
+  async function useDriveCached() {
+    const c = await U.idbGet('kv', 'driveCache').catch(() => null);
+    if (!c || !c.appDir || !c.folders || !c.folders.length) return false;
+    const b = new App.DriveBackend({ id: 'root', name: '내 드라이브' });
+    const L = App.library;
+    L.setup(b, c.folders.map(f => ({ ...f })), { ...c.appDir }, { kind: 'dir', id: 'root', name: '내 드라이브' });
+    const byKey = new Map(L.folders.map(f => [f.key, f]));
+    L.images = c.images.filter(e => byKey.has(e.dir)).map(e => {
+      const dir = byKey.get(e.dir);
+      return { ...e, dir, rel: dir.rel ? [...dir.rel, e.name] : null };
+    });
+    for (const f of L.folders) f.count = L.images.filter(e => e.dir === f).length;
+    L.projects = new Map(c.projects.map(p => [p.name, { ...p }]));
+    L.sort();
+    App.show('gallery');
+    App.gallery.render();
+    App.driveAuth.loadGis().catch(() => {});
+    U.toast('저장된 목록으로 열었어요 — 아무 데나 한 번 누르면 Google에 다시 연결돼요');
+    return true;
+  }
+  let relogging = false;
+  document.addEventListener('click', () => {
+    const A = App.driveAuth, L = App.library;
+    if (relogging || !L.backend || L.backend.kind !== 'drive' || A.valid() || A.pending || !A.ready()) return;
+    relogging = true;
+    let p;
+    try { p = A.request(); } catch { relogging = false; return; }
+    p.then(async () => {
+      if (loginBanner) { loginBanner.remove(); loginBanner = null; }
+      if (!App.editor.visible && !App.viewer.visible) await App.gallery.reload();
+      App.sync.pull();
+      if (!S.driveEmail) { S.driveEmail = await L.backend.email().catch(() => ''); App.saveSettings(); }
+    }).catch(e => U.toast(e.message)).finally(() => { relogging = false; });
+  }, true);
+
   async function reopen() {
     if (S.source === 'local') return useLocal(true);
     if (S.source === 'drive') return useDrive();
@@ -807,7 +859,10 @@
     try {
       if (S.source === 'local') { if (await useLocal(false)) return; }
       else if (S.source === 'opfs') { await useOpfs(); return; }
-      else if (S.source === 'drive' && App.driveAuth.valid()) { await useDrive(); return; }
+      else if (S.source === 'drive') {
+        if (App.driveAuth.valid()) { await useDrive(); return; }
+        if (await useDriveCached()) return;
+      }
     } catch (e) { console.warn(e); }
     App.showHome();
   }

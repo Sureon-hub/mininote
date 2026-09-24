@@ -154,6 +154,7 @@
       }
       this._edited = null;
       this.sort();
+      App.onLibraryRefreshed?.();
     },
     sort() {
       const s = App.settings.sort;
