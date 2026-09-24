@@ -14,32 +14,67 @@
       if (!L.visible) { U.toast('숨겨진 레이어에는 그릴 수 없어요'); return false; }
       this.stroke = new App.Stroke(this.ed, this.preset, this.erase, this.ed.color);
       this.sm = { x: pt.x, y: pt.y };
+      this.start = { x: pt.x, y: pt.y };
+      this.cur = pt;
+      this.lastP = pt.p;
+      this.straight = false;
+      this.anchor = pt;
+      this.armHold();
       this.stroke.add(pt.x, pt.y, pt.p);
       this.stroke.flush();
     }
     move(pt) {
       if (!this.stroke) return;
+      this.cur = pt;
+      if (this.straight) { this.drawLine(); return; }
+      // pen held still while drawing → snap to a straight line (restart the timer whenever it moves)
+      if (Math.hypot(pt.x - this.anchor.x, pt.y - this.anchor.y) * this.ed.z > 4) { this.anchor = pt; this.armHold(); }
       // smoothing fades out with speed: slow wobbly lines get steadied, fast strokes don't trail behind the pen
       const gap = Math.hypot(pt.x - this.sm.x, pt.y - this.sm.y) * this.ed.z; // screen px
-      const s = U.clamp(this.preset.smoothing || 0, 0, 0.95) * 0.9 * Math.exp(-gap / 25);
+      const s = U.clamp(this.preset.smoothing || 0, 0, 0.95) * 0.6 * Math.exp(-gap / 12);
       this.sm.x += (pt.x - this.sm.x) * (1 - s);
       this.sm.y += (pt.y - this.sm.y) * (1 - s);
       this.lastP = pt.p;
       this.stroke.add(this.sm.x, this.sm.y, pt.p);
     }
+    armHold() {
+      clearTimeout(this.holdT);
+      if (this.preset.holdLine) this.holdT = setTimeout(() => this.makeStraight(), 550);
+    }
+    makeStraight() {
+      if (!this.stroke || this.straight || !this.cur) return;
+      if (Math.hypot(this.cur.x - this.start.x, this.cur.y - this.start.y) * this.ed.z < 20) return;
+      this.straight = true;
+      this.lineP = Math.max(this.lastP ?? 1, 0.5);
+      try { navigator.vibrate?.(12); } catch { /* ignore */ }
+      this.drawLine();
+    }
+    drawLine() {
+      const s = this.stroke;
+      s.reset();
+      s.add(this.start.x, this.start.y, this.lineP);
+      s.add(this.cur.x, this.cur.y, this.lineP);
+      this.ed.scheduleFlush(s);
+    }
     frame() { if (this.stroke) this.ed.scheduleFlush(this.stroke); }
     up(pt) {
+      clearTimeout(this.holdT);
       if (!this.stroke) return;
-      // let the smoothed point catch up with the pen
-      for (let i = 1; i <= 6; i++) {
-        this.sm.x += (pt.x - this.sm.x) * 0.5; this.sm.y += (pt.y - this.sm.y) * 0.5;
-        this.stroke.add(this.sm.x, this.sm.y, this.lastP ?? pt.p);
+      if (this.straight) {
+        this.cur = pt;
+        this.drawLine();
+      } else {
+        // let the smoothed point catch up with the pen
+        for (let i = 1; i <= 6; i++) {
+          this.sm.x += (pt.x - this.sm.x) * 0.5; this.sm.y += (pt.y - this.sm.y) * 0.5;
+          this.stroke.add(this.sm.x, this.sm.y, this.lastP ?? pt.p);
+        }
       }
       this.stroke.flush();
       this.stroke.commit();
       this.stroke = null;
     }
-    cancel() { this.stroke?.discard(); this.stroke = null; }
+    cancel() { clearTimeout(this.holdT); this.stroke?.discard(); this.stroke = null; }
   }
   T.BrushTool = BrushTool;
 

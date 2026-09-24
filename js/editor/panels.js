@@ -181,6 +181,11 @@
         sl('간격', 'spacing', 0.01, 0.5, 0.005, v => (v * 100).toFixed(1) + '%'),
         ui.toggle({ label: '필압 → 농도 (약하게 누르면 흐리고 거칠게)', get: () => !!B.pFlow, set: v => { B.pFlow = v; } }),
         ui.slider({ label: '약할 때 농도', min: 0.1, max: 1, step: 0.01, get: () => B.pFlowMin ?? 0.6, set: v => { B.pFlowMin = v; }, fmt: pct }),
+        h('div', { class: 'row seg-row' }, h('span', { class: 'sl-label' }, '끝 모양'),
+          ui.seg({ options: [['round', '둥글게'], ['square', '각지게']], get: () => B.tip || 'round', set: v => { B.tip = v; } })),
+        !erase && h('div', { class: 'row seg-row' }, h('span', { class: 'sl-label' }, '겹칠 때'),
+          ui.seg({ options: [['source-over', '덮기'], ['multiply', '형광펜 (글씨 비침)']], get: () => B.blend || 'source-over', set: v => { B.blend = v; } })),
+        ui.toggle({ label: '긋다가 멈추고 누르고 있으면 직선으로', get: () => !!B.holdLine, set: v => { B.holdLine = v; } }),
         h('button', { class: 'btn small', onclick: () => { S.brushes[key] = JSON.parse(JSON.stringify(App.DEFAULTS.brushes[key])); App.saveSettings(); this.render(); ed.onBrushChanged(); } }, '이 브러시 초기화'));
 
       // outline (테두리)
@@ -253,7 +258,7 @@
         ui.toggle({ label: '필압 → 불투명도', get: () => P.opacity, set: v => { P.opacity = v; onP(); } }),
         ui.slider({ label: '최소 불투명도', min: 0, max: 1, step: 0.01, get: () => P.minOpacity, set: v => { P.minOpacity = v; }, fmt: pct }),
         h('p', { class: 'hint' }, '필압은 펜(S펜·와콤 등)에서만 적용돼요. 마우스·손가락은 항상 최대 굵기로 그려집니다.'));
-      this.el.replaceChildren(...kids);
+      this.el.replaceChildren(...kids.filter(Boolean));
       drawCurve();
     }
   }

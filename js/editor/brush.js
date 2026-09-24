@@ -10,10 +10,18 @@
   const grainCache = new Map();
   let grainBase = null;
 
-  function tip(hardness) {
+  function tip(hardness, shape) {
     const hk = Math.round(hardness * 50) / 50;
-    if (tipCache.has(hk)) return tipCache.get(hk);
+    const key = shape === 'square' ? 'sq' : hk;
+    if (tipCache.has(key)) return tipCache.get(key);
     const c = U.canvas(TIP, TIP), g = c.getContext('2d');
+    if (shape === 'square') {
+      // flat highlighter tip: the union of squares along the path gives a band with square ends
+      g.fillStyle = '#000';
+      g.fillRect(3, 3, TIP - 6, TIP - 6);
+      tipCache.set(key, c);
+      return c;
+    }
     const r = TIP / 2;
     const grad = g.createRadialGradient(r, r, 0, r, r, r);
     if (hk <= 0.02) {
@@ -28,15 +36,15 @@
     }
     g.fillStyle = grad;
     g.fillRect(0, 0, TIP, TIP);
-    tipCache.set(hk, c);
+    tipCache.set(key, c);
     return c;
   }
 
-  function tinted(color, hardness) {
-    const key = color + '|' + Math.round(hardness * 50);
+  function tinted(color, hardness, shape) {
+    const key = color + '|' + Math.round(hardness * 50) + '|' + (shape || '');
     if (tintCache.has(key)) return tintCache.get(key);
     if (tintCache.size > 40) tintCache.clear();
-    const c = U.cloneCanvas(tip(hardness)), g = c.getContext('2d');
+    const c = U.cloneCanvas(tip(hardness, shape)), g = c.getContext('2d');
     g.globalCompositeOperation = 'source-in';
     g.fillStyle = color;
     g.fillRect(0, 0, TIP, TIP);
@@ -94,7 +102,7 @@
       for (let xx = 0; xx < w; xx++, i += 4) {
         const c = d[i];
         if (!c) continue;
-        const cv = 1 - c / 255, cb = 1 - cv * cv;
+        const cv = 1 - c / 255, cb = 1 - cv * cv * cv;
         const t = (1 - G[gy | ((x + xx) & 255)]) * s;
         const a = (cb - t) / (1.001 - t);
         d[i] = a <= 0 ? 0 : a >= 1 ? 255 : a * 255;
@@ -114,7 +122,9 @@
       const bufs = ed.buffers();
       this.bctx = bufs.strokeCtx;
       this.mbuf = bufs.masked; this.mctx = bufs.maskedCtx; this.buf = bufs.stroke;
-      this.tip = tinted(erase ? '#000000' : color, preset.hardness);
+      this.square = preset.tip === 'square';
+      this.tip = tinted(erase ? '#000000' : color, preset.hardness, preset.tip);
+      this.angle = 0;
       this.spacing = U.clamp(preset.spacing || 0.06, 0.01, 1);
       // ~number of stamps whose solid core covers a pixel on the centre line
       this.n = Math.max(1, Math.max(0.2, preset.hardness) * 0.8 / this.spacing);
@@ -127,7 +137,7 @@
       if (this.outline) {
         const ob = ed.buffers('outline');
         this.octx = ob.strokeCtx; this.obuf = ob.stroke; this.ombuf = ob.masked; this.omctx = ob.maskedCtx;
-        this.otip = tinted(O.color, U.lerp(preset.hardness, 0.92, O.smooth));
+        this.otip = tinted(O.color, U.lerp(preset.hardness, 0.92, O.smooth), preset.tip);
         this.ograin = this.grain ? preset.grain * (1 - O.smooth) : 0;
       }
       doc.preview = { layer: L, apply: (sc, r) => this.draw(sc, r) };
@@ -139,7 +149,8 @@
         c.globalCompositeOperation = 'destination-over';
         c.drawImage(this.ombuf, r.x0, r.y0, w, h, r.x0, r.y0, w, h);
       }
-      c.globalCompositeOperation = this.erase ? 'destination-out' : this.L.alphaLock ? 'source-atop' : 'source-over';
+      // blend 'multiply' = highlighter: dark writing underneath (on the same layer) stays readable
+      c.globalCompositeOperation = this.erase ? 'destination-out' : this.L.alphaLock ? 'source-atop' : (this.p.blend || 'source-over');
       c.drawImage(this.mbuf, r.x0, r.y0, w, h, r.x0, r.y0, w, h);
     }
     curve(p) { return Math.pow(U.clamp(p, 0, 1), this.P.gamma); }
@@ -155,20 +166,34 @@
       const s = this.sizeAt(p);
       let a = this.alphaAt(p), d = s;
       if (s < 1.5) { a *= s / 1.5; d = 1.5; }
-      const c = this.bctx;
-      c.globalAlpha = a;
-      c.drawImage(this.tip, x - d / 2, y - d / 2, d, d);
+      const put = (ctx, img, dd) => {
+        if (!this.square) { ctx.drawImage(img, x - dd / 2, y - dd / 2, dd, dd); return; }
+        ctx.save();
+        ctx.translate(x, y); ctx.rotate(this.angle);
+        ctx.drawImage(img, -dd / 2, -dd / 2, dd, dd);
+        ctx.restore();
+      };
+      this.bctx.globalAlpha = a;
+      put(this.bctx, this.tip, d);
       if (this.outline) {
         d = s + this.outline.width * 2;
         this.octx.globalAlpha = 1;
-        this.octx.drawImage(this.otip, x - d / 2, y - d / 2, d, d);
+        put(this.octx, this.otip, d);
       }
-      this.pending = U.rUnion(this.pending, { x0: x - d / 2 - 1, y0: y - d / 2 - 1, x1: x + d / 2 + 1, y1: y + d / 2 + 1 });
+      const e = this.square ? d * 0.71 : d / 2; // a rotated square reaches up to half its diagonal
+      this.pending = U.rUnion(this.pending, { x0: x - e - 1, y0: y - e - 1, x1: x + e + 1, y1: y + e + 1 });
     }
     add(x, y, p) {
-      if (!this.last) { this.stamp(x, y, p); this.last = { x, y, p }; return; }
+      if (!this.last) {
+        // a square tip needs the stroke direction before its first stamp
+        if (this.square) this.needStart = true; else this.stamp(x, y, p);
+        this.last = { x, y, p };
+        return;
+      }
       const l = this.last, dx = x - l.x, dy = y - l.y, d = Math.hypot(dx, dy);
       if (d < 0.01) { this.last.p = p; return; }
+      this.angle = Math.atan2(dy, dx);
+      if (this.needStart) { this.needStart = false; this.stamp(l.x, l.y, l.p); }
       let s = 0;
       for (let guard = 0; guard < 100000; guard++) {
         const t0 = s / d;
@@ -224,6 +249,13 @@
       this.clear(r);
       this.ed.pushHistory(App.History.pixels(doc, L, r, before, rr => this.ed.changed(rr)));
       this.ed.changed(r);
+    }
+    // wipe everything drawn so far (used when a held stroke snaps to a straight line)
+    reset() {
+      const doc = this.doc;
+      const r = U.rClamp(U.rUnion(this.dirty, this.pending), doc.w, doc.h, 2);
+      if (r) { this.clear(r); this.ed.requestComposite(r); }
+      this.dirty = null; this.pending = null; this.last = null; this.acc = 0; this.needStart = false;
     }
     discard() {
       this.doc.preview = null;

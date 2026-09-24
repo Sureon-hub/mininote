@@ -199,15 +199,15 @@ window.App = window.App || {};
     palmRejection: true,
     jpegQuality: 0.92,
     newNote: { w: 1080, h: 1440, bg: '#ffffff' },
-    color: '#3a3a3a',
+    color: '#1a1a1a',
     recentColors: [],
     currentBrush: 'pencil',
-    settingsVersion: 4,
+    settingsVersion: 5,
     pressure: { gamma: 1.0, size: true, minSize: 0.15, opacity: false, minOpacity: 0.25 },
     brushes: {
-      pencil: { name: '연필', size: 16, opacity: 1, flow: 1, hardness: 0.45, grain: 0.6, spacing: 0.025, smoothing: 0.12, pFlow: true, pFlowMin: 0.6, outline: { on: false, color: '#ffffff', width: 4, smooth: 1 } },
-      pen: { name: '펜', size: 5, opacity: 1, flow: 1, hardness: 0.97, grain: 0, spacing: 0.05, smoothing: 0.15, outline: { on: false, color: '#ffffff', width: 3, smooth: 1 } },
-      marker: { name: '마커', size: 28, opacity: 0.55, flow: 1, hardness: 0.92, grain: 0, spacing: 0.05, smoothing: 0.12, outline: { on: false, color: '#ffffff', width: 4, smooth: 1 } },
+      pencil: { name: '연필', size: 16, opacity: 1, flow: 1, hardness: 0.55, grain: 0.5, spacing: 0.025, smoothing: 0, pFlow: true, pFlowMin: 0.85, holdLine: false, outline: { on: false, color: '#ffffff', width: 4, smooth: 1 } },
+      pen: { name: '펜', size: 5, opacity: 1, flow: 1, hardness: 0.97, grain: 0, spacing: 0.05, smoothing: 0.05, holdLine: false, outline: { on: false, color: '#ffffff', width: 3, smooth: 1 } },
+      marker: { name: '형광펜', size: 30, opacity: 0.6, flow: 1, hardness: 0.95, grain: 0, spacing: 0.03, smoothing: 0, tip: 'square', blend: 'multiply', holdLine: true, outline: { on: false, color: '#ffffff', width: 4, smooth: 1 } },
       air: { name: '에어브러시', size: 90, opacity: 0.6, flow: 0.12, hardness: 0, grain: 0, spacing: 0.08, smoothing: 0.2, outline: { on: false, color: '#ffffff', width: 6, smooth: 1 } },
       eraser: { name: '지우개', size: 30, opacity: 1, flow: 1, hardness: 0.9, grain: 0, spacing: 0.05, smoothing: 0.2 },
     },
@@ -238,6 +238,14 @@ window.App = window.App || {};
       const b = App.settings.brushes[k];
       if (b && Math.abs(b.smoothing - old[k]) < 1e-6) b.smoothing = DEFAULTS.brushes[k].smoothing;
     }
+  }
+  // v5: much lighter smoothing, denser pencil, marker becomes a highlighter (square tip, multiply, hold → straight line)
+  if (sv < 5) {
+    const B = App.settings.brushes, D = DEFAULTS.brushes;
+    B.pencil = JSON.parse(JSON.stringify(D.pencil));
+    B.marker = JSON.parse(JSON.stringify(D.marker));
+    B.pen.smoothing = Math.min(B.pen.smoothing, D.pen.smoothing);
+    if (App.settings.color === '#3a3a3a') App.settings.color = DEFAULTS.color;
   }
   App.settings.settingsVersion = DEFAULTS.settingsVersion;
   App.saveSettings = U.debounce(() => {
