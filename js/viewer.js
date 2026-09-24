@@ -159,7 +159,7 @@
       st.addEventListener('pointerdown', e => {
         if (e.pointerType === 'pen') { e.preventDefault(); this.edit(); return; }
         if (e.button > 0) return;
-        st.setPointerCapture(e.pointerId);
+        try { st.setPointerCapture(e.pointerId); } catch { /* ignore */ }
         pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
         if (pts.size === 1) g = { x0: e.clientX, y0: e.clientY, t0: performance.now(), moved: false, mode: null, z0: { ...this.zoom } };
         else if (pts.size === 2) {
