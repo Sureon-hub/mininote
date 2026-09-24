@@ -203,7 +203,8 @@
           const parts = base.split(SEP);
           if (parts[0] === '외부' && parts.length === 2) { external = true; name = parts[1]; }
           else { rel = parts; name = parts[parts.length - 1]; }
-        } else name = base.includes('__') ? base.slice(base.indexOf('__') + 2) : base;
+        } else if (base.includes('__')) name = base.slice(base.indexOf('__') + 2);
+        else { name = base; rel = [base]; } // an image directly in the base folder
         const match = this.images.find(e => this.projectOf(e) === p) || null;
         out.push({ kind: 'file', edited: true, name, rel: match ? this.relOf(match) : rel, project: p, entry: match, external, mtime: match ? match.mtime : p.mtime, size: match ? match.size : 0 });
       }
