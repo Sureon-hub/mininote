@@ -84,7 +84,8 @@
     const L = doc.createLayer('배경');
     L.ctx.drawImage(bmp, 0, 0);
     bmp.close?.();
-    if (blob.size) keepSource(L, blob.type ? blob : new Blob([blob], { type: U.mime(blob.name || '') }));
+    // an in-memory copy: a File from disk stops being readable once the image file is overwritten by a save
+    if (blob.size) keepSource(L, new Blob([await blob.arrayBuffer()], { type: blob.type || U.mime(blob.name || '') }));
     // draw on an empty layer above the image, so the original stays untouched
     const L1 = doc.createLayer('레이어 1');
     doc.layers.push(L, L1);
