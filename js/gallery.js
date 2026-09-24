@@ -23,7 +23,7 @@
       U.$('#g-new').addEventListener('click', () => App.editor.openNew());
     }
     buildBar() {
-      this.btnUp = U.iconBtn('back', '상위 폴더', () => this.up());
+      this.btnUp = U.iconBtn('back', '저장소 선택', () => App.showHome());
       this.titleEl = h('div', { class: 'g-title' });
       this.bar.replaceChildren(
         this.btnUp, this.titleEl, h('div', { class: 'grow' }),
@@ -46,30 +46,45 @@
       } finally { this.setBusy(false); }
     }
     setBusy(b) { this.root.classList.toggle('busy', b); }
-    async up() {
-      if (await App.library.up()) this.render(); else App.showHome();
-    }
-    async enter(dir) {
-      this.setBusy(true);
-      try { await App.library.enter(dir); this.render(); this.scroll.scrollTop = 0; }
-      catch (e) { App.handleError(e, '폴더를 열지 못했어요'); }
-      finally { this.setBusy(false); }
-    }
 
     // ---------- render ----------
     render(focusEntry) {
-      const L = App.library;
-      const path = L.path;
+      const L = App.library, list = L.visible(), cur = L.current;
       this.titleEl.replaceChildren(
-        h('b', null, path[path.length - 1] || ''),
-        h('small', null, `${L.backend?.kind === 'drive' ? 'Google Drive' : L.backend?.kind === 'opfs' ? '앱 내부' : 'PC 폴더'} · ${L.images.length}장`));
+        h('b', null, cur ? cur.name : '전체 노트'),
+        h('small', null, `${L.backend?.kind === 'drive' ? 'Google Drive' : L.backend?.kind === 'opfs' ? '앱 내부' : 'PC 폴더'} · ${list.length}장${cur ? '' : ` · 폴더 ${L.folders.length}개`}`));
+      // folder chips: 전체 + each registered folder (+ add). Long-press / right-click a folder for options.
+      const chip = (key, label, count, extra = '') => {
+        const b = h('button', {
+          class: 'dir-chip' + (L.filter === key ? ' on' : '') + extra, onclick: async () => {
+            if (b.longPressed) return;
+            const f = L.folderByKey(key);
+            if (f && f.needsPermission) {
+              // folder access wasn't granted yet: ask now (this tap is the required user gesture)
+              if ((await f.handle.requestPermission({ mode: 'readwrite' })) !== 'granted') return;
+              f.needsPermission = false;
+              await this.reload();
+            }
+            L.setFilter(key); this.render(); this.scroll.scrollTop = 0;
+          },
+        },
+          h('span', null, label), count != null ? h('small', null, String(count)) : null);
+        if (key !== 'all') {
+          let t = 0;
+          b.addEventListener('pointerdown', e => { b.longPressed = false; t = setTimeout(() => { b.longPressed = true; this.folderMenu(key, e.clientX, e.clientY); }, 500); });
+          ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => b.addEventListener(ev, () => clearTimeout(t)));
+          b.addEventListener('contextmenu', e => { e.preventDefault(); clearTimeout(t); this.folderMenu(key, e.clientX, e.clientY); });
+        }
+        return b;
+      };
       this.dirsEl.replaceChildren(
-        ...L.dirs.map(d => h('button', { class: 'dir-chip', onclick: () => this.enter(d), html: App.icon('folder') + `<span>${escapeHtml(d.name)}</span>` })),
-        h('button', { class: 'dir-chip add', title: '새 폴더', onclick: () => this.newFolder(), html: App.icon('folderPlus') }));
+        chip('all', '전체', L.images.length),
+        ...L.folders.map(f => chip(f.key, (f.error ? '⚠ ' : '') + f.name, f.count ?? 0, f.error ? ' err' : '')),
+        h('button', { class: 'dir-chip add', title: '폴더 추가 — 다른 폴더의 이미지도 함께 보고 편집해요', onclick: () => App.addFolder(), html: App.icon('folderPlus') + '<span>폴더 추가</span>' }));
       this.io.disconnect();
       this.queue = [];
       const frag = document.createDocumentFragment();
-      L.images.forEach((entry, i) => {
+      list.forEach((entry, i) => {
         const tile = h('div', { class: 'tile', tabindex: 0 });
         tile.entry = entry;
         tile.idx = i;
@@ -80,7 +95,7 @@
         frag.append(tile);
       });
       this.grid.replaceChildren(frag);
-      this.empty.hidden = L.images.length > 0;
+      this.empty.hidden = list.length > 0;
       this.applyCols();
       if (focusEntry) {
         const t = [...this.grid.children].find(x => x.entry === focusEntry);
@@ -140,13 +155,23 @@
       x.drawImage(src, 0, 0, c.width, c.height);
       return U.canvasToBlob(c, 'image/webp', 0.85);
     }
+    // after a background save: swap the tile's picture for the fresh thumbnail
+    refreshEntry(entry) {
+      const tile = [...this.grid.children].find(t => t.entry === entry);
+      const url = entry && this.thumbUrl(entry);
+      if (!tile || !url) return;
+      const img = tile.querySelector('img');
+      if (img) img.src = url; else tile.prepend(h('img', { src: url, alt: '', draggable: 'false' }));
+      if (App.library.hasProject(entry) && !tile.querySelector('.badge')) tile.append(h('span', { class: 'badge', title: '편집파일 있음', html: App.icon('layers') }));
+    }
     // called after saving: store the fresh thumbnail right away
     async putThumb(entry, canvas) {
       if (!entry || !App.library.backend) return;
-      const blob = await this.makeThumb(canvas, canvas.width, canvas.height);
       const k = this.key(entry);
+      const blob = await this.makeThumb(canvas, canvas.width, canvas.height);
       U.idbSet('thumbs', k, blob);
       this.urls.set(k, URL.createObjectURL(blob));
+      this.refreshEntry(entry);
     }
 
     // ---------- interactions ----------
@@ -174,7 +199,7 @@
         const tile = press.tile;
         cancel();
         if (this.pinching) return;
-        App.editor.open(App.library.images, App.library.images.indexOf(tile.entry));
+        { const list = App.library.visible(); App.editor.open(list, list.indexOf(tile.entry)); }
       });
       this.grid.addEventListener('contextmenu', e => {
         const tile = e.target.closest('.tile');
@@ -184,7 +209,7 @@
       });
       this.grid.addEventListener('keydown', e => {
         const tile = e.target.closest('.tile');
-        if (tile && e.key === 'Enter') App.editor.open(App.library.images, App.library.images.indexOf(tile.entry));
+        if (tile && e.key === 'Enter') { const list = App.library.visible(); App.editor.open(list, list.indexOf(tile.entry)); }
       });
     }
     bindPinch() {
@@ -223,12 +248,12 @@
         { label: L.backend.trashToFolder ? '휴지통 폴더로 이동' : 'Drive 휴지통으로 이동', value: 'trash', danger: true },
       ], x, y);
       try {
-        if (v === 'open') App.editor.open(L.images, L.images.indexOf(entry));
+        if (v === 'open') { const list = L.visible(); App.editor.open(list, list.indexOf(entry)); }
         else if (v === 'rename') {
           const n = await U.dialog({ title: '이름 바꾸기', input: { value: U.baseName(entry.name) }, buttons: [{ label: '취소', value: null }, { label: '확인', value: true, primary: true }] });
           if (n) { await L.rename(entry, n); this.render(); }
         } else if (v === 'info') {
-          U.dialog({ title: entry.name, body: `수정: ${U.fmtDate(entry.mtime)}\n크기: ${Math.round((entry.size || 0) / 1024)} KB\n편집파일: ${L.hasProject(entry) ? '있음 (' + App.project.EDIT_DIR + ' 폴더)' : '없음 (처음 저장할 때 생성)'}` });
+          U.dialog({ title: entry.name, body: `폴더: ${entry.dir.name}\n수정: ${U.fmtDate(entry.mtime)}\n크기: ${Math.round((entry.size || 0) / 1024)} KB\n편집파일: ${L.hasProject(entry) ? `있음 (앱 폴더 "${L.appDir.name}")` : '없음 (처음 저장할 때 생성)'}` });
         } else if (v === 'trash') {
           const ok = await U.dialog({ title: '휴지통으로 이동할까요?', body: `"${entry.name}"과(와) 편집파일을 ${L.backend.trashToFolder ? `"${App.project.TRASH_DIR}" 폴더로` : 'Google Drive 휴지통으로'} 옮깁니다.`, buttons: [{ label: '취소', value: false }, { label: '이동', value: true, danger: true, primary: true }] });
           if (ok) { await L.trash(entry); this.render(); U.toast('휴지통으로 옮겼어요'); }
@@ -260,10 +285,17 @@
       App.library.sort();
       this.render();
     }
-    async newFolder() {
-      const n = await U.dialog({ title: '새 폴더', input: { placeholder: '폴더 이름' }, buttons: [{ label: '취소', value: null }, { label: '만들기', value: true, primary: true }] });
-      if (!n) return;
-      try { await App.library.createFolder(n); this.render(); } catch (e) { App.handleError(e, '폴더를 만들지 못했어요'); }
+    async folderMenu(key, x, y) {
+      const S = App.settings, f = App.library.folderByKey(key);
+      if (!f) return;
+      const isTarget = (App.library.folderByKey(S.newNoteFolder) || App.library.folders[0]) === f;
+      const v = await U.menu([
+        { label: f.name + (f.error ? ` — ${f.error}` : ''), value: null }, '-',
+        { label: '새 노트를 이 폴더에 저장', value: 'target', checked: isTarget },
+        { label: '목록에서 빼기', value: 'remove', danger: true },
+      ], x, y);
+      if (v === 'target') { S.newNoteFolder = key; App.saveSettings(); U.toast(`새 노트는 "${f.name}"에 저장돼요 (전체 보기일 때)`); }
+      else if (v === 'remove') App.removeFolder(key);
     }
   }
 

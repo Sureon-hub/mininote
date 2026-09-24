@@ -45,6 +45,8 @@
       this.penSeen = false;
       this.ants = 0;
       this.list = []; this.idx = -1;
+      this.cache = new Map();        // entry -> Promise<{doc, ctx}> preloaded neighbours
+      this.pendingSaves = new Map(); // entry -> Promise of a background save
       this.pBrush = new App.ui.BrushPanel(this);
       this.pColor = new App.ui.ColorPanel(this);
       this.pLayers = new App.ui.LayersPanel(this);
@@ -72,6 +74,7 @@
         this.nameEl, h('div', { class: 'grow' }),
         this.btnPrev, this.btnNext, h('span', { class: 'sep' }),
         this.btnUndo, this.btnRedo, this.btnSave,
+        U.iconBtn('image', '이미지 넣기 (사진·카메라·파일 → 새 레이어)', () => this.pickImage()),
         U.iconBtn('layers', '레이어', () => this.toggleTab('layers')),
         U.iconBtn('more', '더보기', e => this.moreMenu(e.currentTarget)));
 
@@ -316,7 +319,7 @@
     }
     openNew() {
       if (!App.library.backend) return;
-      this.list = App.library.images; this.idx = -1;
+      this.list = App.library.visible(); this.idx = -1;
       App.show('editor');
       const { doc, ctx } = App.library.newDoc();
       this.setDoc(doc, ctx, false);
@@ -325,19 +328,60 @@
       const entry = this.list[i];
       if (!entry) return;
       this.loading = true;
-      this.doc = null; this.requestRender();
-      this.showLoading(true, entry);
       this.nameEl.textContent = entry.name;
+      // only show the loading overlay if it isn't instant (preloaded notes appear immediately)
+      const lt = setTimeout(() => { this.doc = null; this.requestRender(); this.showLoading(true, entry); }, 90);
       try {
-        const r = await App.library.open(entry);
+        const r = await this.fetchDoc(entry);
         if (this.list[this.idx] !== entry) return;
         this.setDoc(r.doc, r.ctx, r.dirty);
+        setTimeout(() => this.preloadAround(), 60);
       } catch (e) {
         if ((await App.handleError(e, '열기 실패')) === 'retry') return this.loadIndex(i);
       } finally {
+        clearTimeout(lt);
         this.loading = false;
         this.showLoading(false);
       }
+    }
+    // ---- speed: neighbours are loaded ahead, saves run in the background ----
+    async fetchDoc(entry) {
+      const c = this.cache.get(entry);
+      this.cache.delete(entry);
+      if (c) { const v = await c; if (v) return v; }
+      await this.pendingSaves.get(entry);
+      return App.library.open(entry);
+    }
+    preloadAround() {
+      if (this.idx < 0 || !this.doc) return;
+      const want = new Set([this.list[this.idx - 1], this.list[this.idx + 1]].filter(Boolean));
+      for (const e of [...this.cache.keys()]) if (!want.has(e)) this.cache.delete(e);
+      for (const e of want) {
+        if (this.cache.has(e)) continue;
+        this.cache.set(e, (async () => {
+          await this.pendingSaves.get(e);
+          return App.library.open(e, { quiet: true });
+        })().catch(() => null));
+      }
+    }
+    // save the note being left without making the user wait; a failure brings up a retry dialog
+    saveInBackground() {
+      const doc = this.doc, ctx = this.ctx, entry = ctx.image;
+      this.dirty = false;
+      const run = async () => {
+        try {
+          await App.library.save(doc, ctx);
+          App.gallery.refreshEntry(ctx.image);
+        } catch (e) {
+          const r = await App.handleError(e, `"${ctx.name}" 저장 실패`);
+          if (r === 'retry') return run();
+          const again = await U.dialog({ title: '저장하지 못했어요', body: `"${ctx.name}"의 변경 내용이 아직 저장되지 않았어요.`, buttons: [{ label: '버리기', value: false, danger: true }, { label: '다시 시도', value: true, primary: true }] });
+          if (again) return run();
+        }
+      };
+      const p = run().finally(() => { if (this.pendingSaves.get(entry) === p) this.pendingSaves.delete(entry); });
+      this.pendingSaves.set(entry, p);
+      this.cache.delete(entry);
     }
     setDoc(doc, ctx, dirty) {
       if (this.textEd) App.text.cancel(this);
@@ -367,13 +411,17 @@
     }
     // brush strokes are pushed through grain/selection once per animation frame, not per pointer event
     scheduleFlush(stroke) { this.pendingFlush = stroke; this.requestRender(); }
-    async leaveGuard() {
+    async leaveGuard(background) {
       if (!this.doc) return true;
       if (this.textEd) await App.text.commit(this);
       if (this.action) this.cancelAction(true);
       this.tools.transform.commit();
       if (!this.dirty) return true;
-      if (App.settings.autosave) return this.save();
+      if (App.settings.autosave) {
+        // existing notes save in the background; brand-new notes are saved first (they join the list)
+        if (background && this.ctx.image) { this.saveInBackground(); return true; }
+        return this.save();
+      }
       const r = await U.dialog({
         title: '저장할까요?', body: '변경 내용이 아직 저장되지 않았어요.',
         buttons: [{ label: '취소', value: null }, { label: '저장 안 함', value: 'discard', danger: true }, { label: '저장', value: 'save', primary: true }],
@@ -385,9 +433,10 @@
       if (this.closing) return false;
       this.closing = true;
       try {
-        if (!(await this.leaveGuard())) return false;
+        if (!(await this.leaveGuard(true))) return false;
         const cur = this.ctx?.image;
         this.doc = null; this.ctx = null; this.bufs = null;
+        this.cache.clear();
         this.history.clear();
         App.show('gallery');
         App.gallery.render(cur);
@@ -400,12 +449,12 @@
       if (ni < 0 || ni >= this.list.length) { this.bounce(delta); return; }
       this.navBusy = true;
       try {
-        if (!(await this.leaveGuard())) { this.snapBack(); return; }
+        if (!(await this.leaveGuard(true))) { this.snapBack(); return; }
         const W = this.stage.clientWidth;
         const cv = this.canvas;
-        cv.style.transition = 'transform .16s ease-in';
+        cv.style.transition = 'transform .12s ease-in';
         cv.style.transform = `translateX(${-delta * W}px)`;
-        await U.sleep(150);
+        await U.sleep(110);
         cv.style.transition = 'none';
         cv.style.transform = `translateX(${delta * W * 0.4}px)`;
         this.idx = ni;
@@ -439,7 +488,7 @@
           try {
             await App.library.save(this.doc, this.ctx);
             this.dirty = false;
-            if (this.idx < 0) { this.list = App.library.images; this.idx = this.list.indexOf(this.ctx.image); }
+            if (this.idx < 0) { this.list = App.library.visible(); this.idx = this.list.indexOf(this.ctx.image); }
             this.updateTitle();
             U.toast('저장됨 · 원본 이미지와 편집파일이 모두 갱신됐어요');
             return true;
@@ -641,7 +690,7 @@
         doc.active = L;
       });
       this.setSelection(null);
-      this.setTool('transform');
+      if (this.toolName === 'transform') this.tools.transform.activate(); else this.setTool('transform');
     }
 
     // ================= selection =================
@@ -824,6 +873,17 @@
         if (item) { e.preventDefault(); this.pasteImage(item.getAsFile()); }
         else if (this.clip) { e.preventDefault(); this.pasteImage(this.clip.c, this.clip.b); }
       });
+    }
+    // photo library / camera / file → new layer (then the transform tool to place it)
+    pickImage() {
+      if (!this.doc) return;
+      const inp = h('input', { type: 'file', accept: 'image/*', multiple: true, style: { display: 'none' } });
+      inp.addEventListener('change', async () => {
+        for (const f of inp.files) await this.pasteImage(f);
+        inp.remove();
+      });
+      document.body.append(inp);
+      inp.click();
     }
     ptOf(e) {
       const r = this.canvasRect || (this.canvasRect = this.canvas.getBoundingClientRect());

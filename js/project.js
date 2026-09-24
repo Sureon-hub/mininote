@@ -1,10 +1,10 @@
 'use strict';
-// .mnote project format + library (folder listing, open / save / rename / trash).
+// .mnote project format + library (several image folders, one app folder for edit files).
 //
-// Folder layout:
-//   <folder>/note.png                  <- the image everyone sees (overwritten on save)
-//   <folder>/_편집파일/note.png.mnote   <- layered, editable project for that image
-//   <folder>/_휴지통/                  <- local trash (Drive uses its own trash)
+// Layout:
+//   <any image folder>/note.png                    <- the image everyone sees (overwritten on save)
+//   <app folder>/<folder name>__note.png.mnote     <- layered, editable project for that image
+//   <folder>/_휴지통/                               <- local trash (Drive uses its own trash)
 (() => {
   const U = App.util;
   const EDIT_DIR = '_편집파일';
@@ -61,7 +61,7 @@
     const L = doc.createLayer('배경');
     L.ctx.drawImage(bmp, 0, 0);
     bmp.close?.();
-    // draw on an empty layer above the image, so the original stays untouched (and outlines can sit behind strokes)
+    // draw on an empty layer above the image, so the original stays untouched
     const L1 = doc.createLayer('레이어 1');
     doc.layers.push(L, L1);
     doc.active = L1;
@@ -69,27 +69,46 @@
   }
 
   const byName = (a, b) => a.name.localeCompare(b.name, 'ko', { numeric: true });
+  const safe = s => s.replace(/[\\/:*?"<>|]/g, '_');
 
   // ---------------- library ----------------
+  // Several image folders are shown together. Every edit file lives in ONE app folder (appDir),
+  // named "<folder name>__<image name>.mnote"; saving still overwrites the image in its own folder.
   const lib = App.library = {
-    backend: null, dir: null, stack: [],
-    images: [], dirs: [], projects: new Map(), editDir: null,
+    backend: null, folders: [], appDir: null,
+    images: [], projects: new Map(), filter: 'all',
 
-    setBackend(b) { this.backend = b; this.dir = b.root(); this.stack = []; this.images = []; this.dirs = []; this.projects = new Map(); },
-    get path() { return [...this.stack, this.dir].map(d => d.name); },
-    async enter(dir) { this.stack.push(this.dir); this.dir = dir; await this.refresh(); },
-    async up() { if (!this.stack.length) return false; this.dir = this.stack.pop(); await this.refresh(); return true; },
+    setup(backend, folders, appDir) {
+      this.backend = backend; this.folders = folders; this.appDir = appDir;
+      this.images = []; this.projects = new Map();
+      this.filter = folders.some(f => f.key === App.settings.folderFilter) ? App.settings.folderFilter : 'all';
+    },
+    folderByKey(k) { return this.folders.find(f => f.key === k) || null; },
+    get current() { return this.filter === 'all' ? null : this.folderByKey(this.filter); },
+    setFilter(k) { this.filter = k; App.settings.folderFilter = k; App.saveSettings(); },
+    visible() { const f = this.current; return f ? this.images.filter(e => e.dir === f) : this.images; },
+    // where new notes / shared images go
+    targetFolder() { return this.current || this.folderByKey(App.settings.newNoteFolder) || this.folders[0]; },
 
     async refresh() {
-      const b = this.backend, dir = this.dir;
-      const all = await b.list(dir);
-      if (dir !== this.dir) return; // navigated away meanwhile
-      this.images = all.filter(e => e.kind === 'file' && U.isImage(e.name));
-      this.dirs = all.filter(e => e.kind === 'dir' && !/^[._]/.test(e.name)).sort(byName);
-      this.editDir = all.find(e => e.kind === 'dir' && e.name === EDIT_DIR) || null;
+      const b = this.backend;
+      const lists = await Promise.all(this.folders.map(async f => {
+        if (f.needsPermission) { f.error = '권한 필요 — 눌러서 허용'; return []; }
+        try {
+          f.error = null;
+          return (await b.list(f)).filter(e => e.kind === 'file' && U.isImage(e.name)).map(e => Object.assign(e, { dir: f }));
+        } catch (e) {
+          if (e.auth) throw e;
+          f.error = e.message || String(e);
+          return [];
+        }
+      }));
+      this.images = lists.flat();
+      for (const f of this.folders) f.count = this.images.filter(e => e.dir === f).length;
       this.projects = new Map();
-      if (this.editDir) {
-        for (const p of await b.list(this.editDir)) if (p.kind === 'file' && p.name.endsWith(EXT)) this.projects.set(p.name, p);
+      if (this.appDir) {
+        try { for (const p of await b.list(this.appDir)) if (p.kind === 'file' && p.name.endsWith(EXT)) this.projects.set(p.name, p); }
+        catch (e) { if (e.auth) throw e; }
       }
       this.sort();
     },
@@ -103,12 +122,25 @@
       }[s] || ((a, b) => b.mtime - a.mtime);
       this.images.sort(f);
     },
-    hasProject(entry) { return this.projects.has(entry.name + EXT); },
+    projName(dir, name) { return `${safe(dir.name)}__${name}${EXT}`; },
+    // older versions kept "<name>.mnote" in "<folder>/_편집파일"; when that is the app folder they are still found here
+    legacyName(entry) { return this.appDir && this.appDir.ownerKey === entry.dir.key ? entry.name + EXT : null; },
+    projectOf(entry) {
+      const legacy = this.legacyName(entry);
+      return this.projects.get(this.projName(entry.dir, entry.name)) || (legacy && this.projects.get(legacy)) || null;
+    },
+    hasProject(entry) { return !!this.projectOf(entry); },
 
     // -------- open --------
-    async open(entry) {
-      const b = this.backend, dir = this.dir;
-      const ctx = { backend: b, dir, editDir: this.editDir, image: entry, name: entry.name, project: this.projects.get(entry.name + EXT) || null };
+    // opts.quiet: used for background preloading – never shows a dialog, returns null instead
+    async open(entry, opts = {}) {
+      const b = this.backend, dir = entry.dir;
+      const ctx = { backend: b, dir, image: entry, name: entry.name, project: this.projectOf(entry) };
+      if (!ctx.project) {
+        // edit file left by an older version inside the image's own folder
+        const old = await b.findDir(dir, EDIT_DIR, false).catch(() => null);
+        if (old) ctx.project = await b.find(old, entry.name + EXT).catch(() => null);
+      }
       if (ctx.project) {
         let data = null;
         try { data = await App.project.decode(await b.read(ctx.project)); }
@@ -117,6 +149,7 @@
           const im = data.header.image || {};
           const maybeChanged = (entry.mtime && im.mtime && entry.mtime > im.mtime + 3000) || (im.size && entry.size && im.size !== entry.size);
           if (maybeChanged) {
+            if (opts.quiet) return null;
             const imgBlob = await b.read(entry);
             if ((await U.hash(imgBlob)) !== im.hash) {
               const choice = await U.dialog({
@@ -153,13 +186,20 @@
       const L1 = doc.createLayer('레이어 1');
       doc.layers.push(L0, L1);
       doc.active = L1;
-      const ctx = { backend: this.backend, dir: this.dir, editDir: this.editDir, image: null, name: `note_${U.stamp()}.png`, project: null };
+      const ctx = { backend: this.backend, dir: this.targetFolder(), image: null, name: `note_${U.stamp()}.png`, project: null };
+      return { doc, ctx };
+    },
+    // a new note whose background is an image (shared from another app, dropped, picked…)
+    async newDocFromImage(blob) {
+      const doc = await docFromImageBlob(blob);
+      const ctx = { backend: this.backend, dir: this.targetFolder(), image: null, name: `image_${U.stamp()}.png`, project: null };
       return { doc, ctx };
     },
 
-    // -------- save: overwrite original image + write project --------
+    // -------- save: overwrite the image in its folder + write the edit file into the app folder --------
     async save(doc, ctx) {
       const b = ctx.backend;
+      if (!this.appDir) throw new Error('앱 폴더(편집파일 보관 위치)가 없어요');
       const flat = doc.flatten();
       const mime = U.mime(ctx.name);
       let out = flat;
@@ -173,19 +213,18 @@
 
       const written = await b.write(ctx.dir, ctx.name, imgBlob, ctx.image);
       const isNew = !ctx.image;
-      if (ctx.image) Object.assign(ctx.image, written); else ctx.image = written;
+      if (ctx.image) Object.assign(ctx.image, written); else ctx.image = Object.assign(written, { dir: ctx.dir });
 
-      if (!ctx.editDir) ctx.editDir = await b.findDir(ctx.dir, EDIT_DIR, true);
-      const projName = ctx.name + EXT;
-      if (!ctx.project) ctx.project = await b.find(ctx.editDir, projName);
-      const projBlob = await App.project.encode(doc, { name: ctx.name, mtime: written.mtime, size: written.size || imgBlob.size, hash });
-      const pw = await b.write(ctx.editDir, projName, projBlob, ctx.project);
-      if (ctx.project) Object.assign(ctx.project, pw); else ctx.project = pw;
+      const projName = this.projName(ctx.dir, ctx.name);
+      const existing = this.projects.get(projName) || (ctx.project && ctx.project.name === projName ? ctx.project : null) || await b.find(this.appDir, projName);
+      const projBlob = await App.project.encode(doc, { name: ctx.name, folder: ctx.dir.name, mtime: written.mtime, size: written.size || imgBlob.size, hash });
+      ctx.project = await b.write(this.appDir, projName, projBlob, existing);
+      this.projects.set(projName, ctx.project);
 
-      if (this.backend === b && this.dir === ctx.dir) {
-        this.editDir = ctx.editDir;
-        this.projects.set(projName, ctx.project);
-        if (isNew) { this.images.push(ctx.image); this.sort(); }
+      if (isNew && this.folders.includes(ctx.dir)) {
+        this.images.push(ctx.image);
+        ctx.dir.count = (ctx.dir.count || 0) + 1;
+        this.sort();
       }
       App.gallery?.putThumb(ctx.image, flat);
       return ctx.image;
@@ -197,47 +236,38 @@
       return `${U.baseName(name)}_${U.stamp()}.${U.ext(name)}`;
     },
     async trash(entry) {
-      const b = this.backend, dir = this.dir;
-      const proj = this.projects.get(entry.name + EXT);
+      const b = this.backend, dir = entry.dir;
+      const proj = this.projectOf(entry);
       if (b.trashToFolder) {
         const t = await b.findDir(dir, TRASH_DIR, true);
-        const name = await this.freeName(b, t, entry.name);
-        await b.write(t, name, await b.read(entry));
+        await b.write(t, await this.freeName(b, t, entry.name), await b.read(entry));
         await b.remove(dir, entry);
         if (proj) {
-          const te = await b.findDir(t, EDIT_DIR, true);
-          await b.write(te, name + EXT, await b.read(proj));
-          await b.remove(this.editDir, proj);
+          const tp = await b.findDir(this.appDir, TRASH_DIR, true);
+          await b.write(tp, await this.freeName(b, tp, proj.name), await b.read(proj));
+          await b.remove(this.appDir, proj);
         }
       } else {
         await b.remove(dir, entry);
-        if (proj) await b.remove(this.editDir, proj);
+        if (proj) await b.remove(this.appDir, proj);
       }
       this.images = this.images.filter(e => e !== entry);
-      this.projects.delete(entry.name + EXT);
+      if (proj) this.projects.delete(proj.name);
+      dir.count = Math.max(0, (dir.count || 1) - 1);
     },
     async rename(entry, newBase) {
-      const b = this.backend, dir = this.dir;
+      const b = this.backend, dir = entry.dir;
       const newName = newBase.trim() + '.' + U.ext(entry.name);
       if (!newBase.trim() || /[\\/:*?"<>|]/.test(newBase)) throw new Error('사용할 수 없는 이름입니다');
       if (newName === entry.name) return;
-      if (this.images.some(e => e.name === newName)) throw new Error('같은 이름의 이미지가 이미 있습니다');
-      const oldProj = entry.name + EXT;
-      const proj = this.projects.get(oldProj);
-      Object.assign(entry, await b.rename(dir, entry, newName));
+      if (this.images.some(e => e.dir === dir && e.name === newName)) throw new Error('같은 이름의 이미지가 이미 있습니다');
+      const proj = this.projectOf(entry);
+      Object.assign(entry, await b.rename(dir, entry, newName), { dir });
       if (proj) {
-        const np = await b.rename(this.editDir, proj, newName + EXT);
-        this.projects.delete(oldProj);
-        this.projects.set(newName + EXT, np);
+        const np = await b.rename(this.appDir, proj, this.projName(dir, newName));
+        this.projects.delete(proj.name);
+        this.projects.set(np.name, np);
       }
-    },
-    async createFolder(name) {
-      name = name.trim();
-      if (!name || /[\\/:*?"<>|]/.test(name)) throw new Error('사용할 수 없는 이름입니다');
-      const d = await this.backend.findDir(this.dir, name, true);
-      if (!this.dirs.some(x => x.name === d.name)) this.dirs.push(d);
-      this.dirs.sort(byName);
-      return d;
     },
   };
   lib.docFromImageBlob = docFromImageBlob;
