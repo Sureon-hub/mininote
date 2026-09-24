@@ -662,6 +662,19 @@
         c.setLineDash([4, 4]); c.lineDashOffset = -this.ants; c.strokeStyle = '#111'; c.stroke();
         c.restore();
       }
+      const st = this.action?.tool?.stroke, pred = this.predicted;
+      if (st && st.last && pred && pred.length) {
+        const s0 = this.toScreen(st.last.x, st.last.y);
+        c.save();
+        c.lineCap = 'round'; c.lineJoin = 'round';
+        c.strokeStyle = this.color;
+        c.globalAlpha = st.p.opacity * 0.85;
+        c.lineWidth = Math.max(1, st.sizeAt(st.last.p) * this.z * 0.9);
+        c.beginPath(); c.moveTo(s0[0], s0[1]);
+        for (const q of pred) c.lineTo(q.sx, q.sy);
+        c.stroke();
+        c.restore();
+      }
       const tool = this.action?.tool || this.tools[this.toolName];
       tool.drawOverlay?.(c);
       if (tool !== this.tools.transform) this.tools.transform.drawOverlay(c);
@@ -775,6 +788,8 @@
         const evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
         for (const ce of evs.length ? evs : [e]) a.tool.move(this.ptOf(ce), e);
         a.tool.frame?.();
+        // where the pen is about to be: drawn as a temporary tail so the line keeps up with the pen tip
+        this.predicted = a.tool.stroke && !a.tool.erase && e.getPredictedEvents ? e.getPredictedEvents().map(pe => this.ptOf(pe)) : null;
         a.lastPt = pt;
         if (e.pointerType !== 'touch') this.hover = pt;
         this.requestRender();
@@ -794,6 +809,7 @@
       const a = this.action;
       if (!a || a.id !== e.pointerId) return;
       this.action = null;
+      this.predicted = null;
       if (a.kind === 'tool') {
         if (cancelled) a.tool.cancel(); else a.tool.up(this.ptOf(e), e);
         this.requestRender();

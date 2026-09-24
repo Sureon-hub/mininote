@@ -19,7 +19,9 @@
     }
     move(pt) {
       if (!this.stroke) return;
-      const s = U.clamp(this.preset.smoothing || 0, 0, 0.95) * 0.9;
+      // smoothing fades out with speed: slow wobbly lines get steadied, fast strokes don't trail behind the pen
+      const gap = Math.hypot(pt.x - this.sm.x, pt.y - this.sm.y) * this.ed.z; // screen px
+      const s = U.clamp(this.preset.smoothing || 0, 0, 0.95) * 0.9 * Math.exp(-gap / 25);
       this.sm.x += (pt.x - this.sm.x) * (1 - s);
       this.sm.y += (pt.y - this.sm.y) * (1 - s);
       this.lastP = pt.p;

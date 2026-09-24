@@ -202,12 +202,12 @@ window.App = window.App || {};
     color: '#3a3a3a',
     recentColors: [],
     currentBrush: 'pencil',
-    settingsVersion: 3,
+    settingsVersion: 4,
     pressure: { gamma: 1.0, size: true, minSize: 0.15, opacity: false, minOpacity: 0.25 },
     brushes: {
-      pencil: { name: '연필', size: 16, opacity: 1, flow: 1, hardness: 0.45, grain: 0.6, spacing: 0.025, smoothing: 0.3, pFlow: true, pFlowMin: 0.6, outline: { on: false, color: '#ffffff', width: 4, smooth: 1 } },
-      pen: { name: '펜', size: 5, opacity: 1, flow: 1, hardness: 0.97, grain: 0, spacing: 0.05, smoothing: 0.45, outline: { on: false, color: '#ffffff', width: 3, smooth: 1 } },
-      marker: { name: '마커', size: 28, opacity: 0.55, flow: 1, hardness: 0.92, grain: 0, spacing: 0.05, smoothing: 0.3, outline: { on: false, color: '#ffffff', width: 4, smooth: 1 } },
+      pencil: { name: '연필', size: 16, opacity: 1, flow: 1, hardness: 0.45, grain: 0.6, spacing: 0.025, smoothing: 0.12, pFlow: true, pFlowMin: 0.6, outline: { on: false, color: '#ffffff', width: 4, smooth: 1 } },
+      pen: { name: '펜', size: 5, opacity: 1, flow: 1, hardness: 0.97, grain: 0, spacing: 0.05, smoothing: 0.15, outline: { on: false, color: '#ffffff', width: 3, smooth: 1 } },
+      marker: { name: '마커', size: 28, opacity: 0.55, flow: 1, hardness: 0.92, grain: 0, spacing: 0.05, smoothing: 0.12, outline: { on: false, color: '#ffffff', width: 4, smooth: 1 } },
       air: { name: '에어브러시', size: 90, opacity: 0.6, flow: 0.12, hardness: 0, grain: 0, spacing: 0.08, smoothing: 0.2, outline: { on: false, color: '#ffffff', width: 6, smooth: 1 } },
       eraser: { name: '지우개', size: 30, opacity: 1, flow: 1, hardness: 0.9, grain: 0, spacing: 0.05, smoothing: 0.2 },
     },
@@ -231,6 +231,14 @@ window.App = window.App || {};
   const sv = saved.settingsVersion || 1;
   if (sv < 2) App.settings.pressure = JSON.parse(JSON.stringify(DEFAULTS.pressure));
   if (sv < 3) App.settings.brushes.pencil = JSON.parse(JSON.stringify(DEFAULTS.brushes.pencil));
+  // v4: lighter default smoothing (less lag behind the pen) – only where the old default was never changed
+  if (sv < 4) {
+    const old = { pencil: 0.3, pen: 0.45, marker: 0.3 };
+    for (const k of Object.keys(old)) {
+      const b = App.settings.brushes[k];
+      if (b && Math.abs(b.smoothing - old[k]) < 1e-6) b.smoothing = DEFAULTS.brushes[k].smoothing;
+    }
+  }
   App.settings.settingsVersion = DEFAULTS.settingsVersion;
   App.saveSettings = U.debounce(() => {
     try { localStorage.setItem('mininote.settings', JSON.stringify(App.settings)); } catch { /* storage unavailable */ }
