@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.7.1';
+  App.VERSION = '0.8.0';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -87,9 +87,11 @@
     App.sync.last = null; App.sync.entry = null;
     App.sync.pull();
   }
-  // A "collection" = several image folders + one app folder that holds all edit files.
-  // local: folder handles live in IndexedDB; drive: {id,name} in settings; opfs: sub-folders of MiniNote.
-  const APP_DIR = App.project.EDIT_DIR;
+  // A "collection" = several image folders + the app's own folders under the base folder:
+  //   <base>/미니수첩/편집파일   – every edit file (+ settings sync file)
+  //   <base>/미니수첩/새 노트    – new notes and images brought in from the phone / share / drop
+  // local: folder handles live in IndexedDB; drive: {id,name} in settings (base = 내 드라이브); opfs: MiniNote.
+  const APP_HOME = '미니수첩', APP_EDIT = '편집파일', APP_NEW = '새 노트';
   const localDir = (hd, i) => ({ kind: 'dir', name: hd.name, handle: hd, path: `/${i}:${hd.name}`, key: `L${i}:${hd.name}` });
   async function localHandles() {
     let hs = await U.idbGet('kv', 'localFolders');
@@ -104,11 +106,52 @@
     }
     return true;
   }
+  // create (if needed) 미니수첩/편집파일 and 미니수첩/새 노트 under the base folder
+  async function appStructure(b, root) {
+    const home = await b.findDir(root, APP_HOME, true);
+    const edit = await b.findDir(home, APP_EDIT, true);
+    const notes = await b.findDir(home, APP_NEW, true);
+    edit.rel = [APP_HOME, APP_EDIT]; notes.rel = [APP_HOME, APP_NEW];
+    return { edit, notes };
+  }
+  // move edit files (and the settings file) from the old app folder into 미니수첩/편집파일 — once
+  async function migrateEditFiles(b, oldDir, newDir, oldOwner) {
+    if (!oldDir) return 0;
+    let items;
+    try { items = await b.list(oldDir); } catch { return 0; }
+    const syncFile = await b.find(oldDir, App.sync.NAME).catch(() => null);
+    if (syncFile) items.push(syncFile);
+    let moved = 0;
+    for (const it of items) {
+      if (it.kind !== 'file' || !(it.name.endsWith(App.project.EXT) || it.name === App.sync.NAME)) continue;
+      let name = it.name;
+      // "<image>.mnote" of the old first folder → give it its path name so it keeps its image
+      if (oldOwner && oldOwner.rel && !name.includes('＞') && !name.includes('__') && name !== App.sync.NAME) name = [...oldOwner.rel, name].join('＞');
+      const there = await b.find(newDir, name);
+      // keep whichever copy is newer; the old one is removed only after the copy was written
+      if (!there || (it.mtime || 0) > (there.mtime || 0)) await b.write(newDir, name, await b.read(it), there || undefined);
+      await b.remove(oldDir, it);
+      moved++;
+    }
+    return moved;
+  }
   async function useLocal(interactive) {
-    const hs = await localHandles();
-    if (!hs.length) return false;
-    let appH = await U.idbGet('kv', 'localAppDir');
-    if (appH && !(await permitted([appH], interactive))) return false;
+    let hs = await localHandles();
+    const baseH = await U.idbGet('kv', 'baseDir');
+    if (!hs.length && !baseH) return false;
+    let root = null;
+    if (baseH && (await permitted([baseH], interactive).catch(() => false))) root = { kind: 'dir', name: baseH.name, handle: baseH, path: '/r' };
+    else if (baseH && !interactive) return false;
+    const b = new App.LocalBackend(root ? baseH : hs[0], 'local');
+    let appDir, notesKey = null;
+    if (root) {
+      const st = await appStructure(b, root);
+      appDir = st.edit;
+      // "새 노트" is always the first folder of the collection
+      const same = await Promise.all(hs.map(x => x.isSameEntry(st.notes.handle)));
+      hs = [st.notes.handle, ...hs.filter((_, i) => !same[i])];
+      notesKey = localDir(st.notes.handle, 0).key;
+    }
     // each folder needs its own permission; folders that aren't allowed yet show as "권한 필요" and can be tapped later
     const states = await Promise.all(hs.map(hd => (hd.queryPermission ? hd.queryPermission({ mode: 'readwrite' }) : 'granted')));
     if (!interactive && states.some(s => s !== 'granted')) return false;
@@ -116,43 +159,67 @@
       if (states[i] === 'granted') continue;
       try { states[i] = await hs[i].requestPermission({ mode: 'readwrite' }); } catch { states[i] = 'prompt'; }
     }
-    if (states[0] !== 'granted' && !appH) return false;
-    if (!states.includes('granted')) return false;
-    const b = new App.LocalBackend(hs[0], 'local');
+    if (!root && states[0] !== 'granted') return false;
     const folders = hs.map(localDir);
     folders.forEach((f, i) => { f.needsPermission = states[i] !== 'granted'; });
-    let appDir;
-    if (appH) appDir = { kind: 'dir', name: appH.name, handle: appH, path: '/app', ownerKey: S.appOwner || null };
-    else {
-      appDir = await b.findDir(folders[0], APP_DIR, true); // default: "_편집파일" inside the first folder
-      appDir.ownerKey = folders[0].key;
-      S.appOwner = appDir.ownerKey;
+    const oldH = await U.idbGet('kv', 'localAppDir');
+    if (root) {
+      App.library.setup(b, folders, appDir, root);
+      if (oldH && !(await oldH.isSameEntry(appDir.handle)) && (await permitted([oldH], interactive).catch(() => false))) {
+        const oldOwner = folders.find(f => f.key === S.appOwner) || null;
+        if (oldOwner) await App.library.relOfDir(oldOwner);
+        const n = await migrateEditFiles(b, { kind: 'dir', name: oldH.name, handle: oldH, path: '/old' }, appDir, oldOwner);
+        if (n) U.toast(`편집파일 ${n}개를 "미니수첩\\편집파일"로 옮겼어요`);
+      }
       await U.idbSet('kv', 'localAppDir', appDir.handle);
+      S.appOwner = null;
+      if (!S.newNoteFolder || !folders.some(f => f.key === S.newNoteFolder)) S.newNoteFolder = notesKey;
+    } else {
+      // no base folder yet (older setups): the app folder stays "_편집파일" in the first folder
+      let appH = oldH;
+      if (appH && !(await permitted([appH], interactive))) return false;
+      if (appH) appDir = { kind: 'dir', name: appH.name, handle: appH, path: '/app', ownerKey: S.appOwner || null };
+      else {
+        appDir = await b.findDir(folders[0], App.project.EDIT_DIR, true);
+        appDir.ownerKey = folders[0].key;
+        S.appOwner = appDir.ownerKey;
+        await U.idbSet('kv', 'localAppDir', appDir.handle);
+      }
+      App.library.setup(b, folders, appDir, null);
     }
-    // base folder (e.g. "내 드라이브"): edit files remember their images by path below it
-    let root = null;
-    const baseH = await U.idbGet('kv', 'baseDir');
-    if (baseH && (await permitted([baseH], interactive).catch(() => false))) root = { kind: 'dir', name: baseH.name, handle: baseH, path: '/r' };
-    App.library.setup(b, folders, appDir, root);
     S.source = 'local'; App.saveSettings();
     await U.idbSet('kv', 'localFolders', hs);
     await enterGallery();
     return true;
   }
   async function useOpfs() {
-    const root = await navigator.storage.getDirectory();
-    const hd = await root.getDirectoryHandle('MiniNote', { create: true });
+    const top = await navigator.storage.getDirectory();
+    const hd = await top.getDirectoryHandle('MiniNote', { create: true });
     try { await navigator.storage.persist?.(); } catch { /* ignore */ }
     const b = new App.LocalBackend(hd, 'opfs');
-    const names = S.opfsFolders && S.opfsFolders.length ? S.opfsFolders : [null];
-    const folders = [];
-    for (const [i, n] of names.entries()) {
-      const fh = n ? await hd.getDirectoryHandle(n, { create: true }) : hd;
-      folders.push({ kind: 'dir', name: n || '앱 내부 저장소', handle: fh, path: `/o${i}`, key: `O${i}:${n || ''}` });
+    const root = { kind: 'dir', name: '앱 내부 저장소', handle: hd, path: '/r' };
+    const st = await appStructure(b, root);
+    const names = (S.opfsFolders || []).filter(Boolean);
+    const folders = [{ kind: 'dir', name: APP_NEW, handle: st.notes.handle, path: '/o0', key: 'O0:new', rel: st.notes.rel }];
+    for (const [i, n] of names.entries()) folders.push({ kind: 'dir', name: n, handle: await hd.getDirectoryHandle(n, { create: true }), path: `/o${i + 1}`, key: `O${i + 1}:${n}` });
+    App.library.setup(b, folders, st.edit, root);
+    if (!S.opfsMigrated) {
+      // earlier versions kept notes directly in MiniNote and edit files in MiniNote/_편집파일
+      const old = await b.findDir(root, App.project.EDIT_DIR, false);
+      if (old) await migrateEditFiles(b, old, st.edit, { rel: [] });
+      // notes that sat directly in MiniNote move into 미니수첩/새 노트 (their edit files are renamed to match)
+      for (const it of await b.list(root)) {
+        if (it.kind !== 'file' || !U.isImage(it.name)) continue;
+        await b.write(st.notes, it.name, await b.read(it));
+        await b.remove(root, it);
+        for (const oldName of [it.name + App.project.EXT, `앱 내부 저장소__${it.name}${App.project.EXT}`]) {
+          const p = await b.find(st.edit, oldName);
+          if (p) { await b.rename(st.edit, p, ['미니수첩', '새 노트', it.name].join('＞') + App.project.EXT).catch(() => {}); break; }
+        }
+      }
+      S.opfsMigrated = true;
     }
-    const appDir = await b.findDir(folders[0], APP_DIR, true);
-    appDir.ownerKey = folders[0].key;
-    App.library.setup(b, folders, appDir, { kind: 'dir', name: '앱 내부 저장소', handle: hd, path: '/r' });
+    if (!S.newNoteFolder || !folders.some(f => f.key === S.newNoteFolder)) S.newNoteFolder = 'O0:new';
     S.source = 'opfs'; App.saveSettings();
     await enterGallery();
   }
@@ -161,19 +228,22 @@
     return S.driveFolders || [];
   }
   async function useDrive() {
-    const list = driveFolders();
-    if (!list.length) return false;
-    const b = new App.DriveBackend(list[0]);
-    const folders = list.map(f => ({ kind: 'dir', id: f.id, name: f.name, key: 'D' + f.id }));
-    let appDir;
-    if (S.driveAppDir) appDir = { kind: 'dir', id: S.driveAppDir.id, name: S.driveAppDir.name, ownerKey: S.driveAppDir.ownerKey || null };
-    else {
-      appDir = await b.findDir(folders[0], APP_DIR, true);
-      appDir.ownerKey = folders[0].key;
-      S.driveAppDir = { id: appDir.id, name: appDir.name, ownerKey: appDir.ownerKey };
-    }
+    const b = new App.DriveBackend({ id: 'root', name: '내 드라이브' });
     // on Drive the base folder is always "내 드라이브" (the same place as G:\...\내 드라이브 on the PC)
-    App.library.setup(b, folders, appDir, { kind: 'dir', id: 'root', name: '내 드라이브' });
+    const root = { kind: 'dir', id: 'root', name: '내 드라이브' };
+    const st = await appStructure(b, root);
+    const list = [{ id: st.notes.id, name: APP_NEW }, ...driveFolders().filter(f => f.id !== st.notes.id)];
+    S.driveFolders = list.slice(1);
+    const folders = list.map(f => ({ kind: 'dir', id: f.id, name: f.name, key: 'D' + f.id }));
+    App.library.setup(b, folders, st.edit, root);
+    if (S.driveAppDir && S.driveAppDir.id !== st.edit.id) {
+      const oldOwner = folders.find(f => f.key === S.driveAppDir.ownerKey) || null;
+      if (oldOwner) await App.library.relOfDir(oldOwner);
+      const n = await migrateEditFiles(b, { kind: 'dir', id: S.driveAppDir.id, name: S.driveAppDir.name }, st.edit, oldOwner).catch(() => 0);
+      if (n) U.toast(`편집파일 ${n}개를 "미니수첩/편집파일"로 옮겼어요`);
+    }
+    S.driveAppDir = { id: st.edit.id, name: st.edit.name, ownerKey: null };
+    if (!S.newNoteFolder || !folders.some(f => f.key === S.newNoteFolder)) S.newNoteFolder = 'D' + st.notes.id;
     S.source = 'drive'; App.saveSettings();
     await enterGallery();
     return true;
@@ -183,13 +253,17 @@
     if (S.source === 'drive') return useDrive();
     if (S.source === 'opfs') return useOpfs();
   }
+  // PC: pick the base folder (ideally 내 드라이브); 미니수첩/편집파일 and 미니수첩/새 노트 are created inside it
   async function pickLocal() {
+    const ok = await U.dialog({
+      title: 'PC에서 시작하기',
+      body: '구글 드라이브 동기화 폴더의 "내 드라이브"를 골라주세요.\n그 안에 "미니수첩" 폴더를 만들어 새 노트와 편집파일을 깔끔하게 모아둬요. 폰(Google Drive)과도 같은 폴더를 쓰게 돼요.',
+      buttons: [{ label: '취소', value: false }, { label: '폴더 고르기', value: true, primary: true }],
+    });
+    if (!ok) return;
     try {
-      const hd = await showDirectoryPicker({ id: 'mininote', mode: 'readwrite' });
-      // starting over with a new first folder: forget the old collection
-      await U.idbSet('kv', 'localFolders', [hd]);
-      await U.idbDel('kv', 'localAppDir');
-      S.appOwner = null;
+      const hd = await showDirectoryPicker({ id: 'mininote-base', mode: 'readwrite' });
+      await U.idbSet('kv', 'baseDir', hd);
       await useLocal(true);
     } catch (e) { if (e.name !== 'AbortError') App.handleError(e, '폴더를 열지 못했어요'); }
   }
@@ -201,9 +275,7 @@
     try {
       await App.driveAuth.loadGis();
       if (!App.driveAuth.valid()) await App.driveAuth.request();
-      const folder = await pickDriveFolder();
-      if (!folder) return;
-      S.driveFolders = [folder]; S.driveAppDir = null; S.driveFolder = null;
+      // "내 드라이브/미니수첩" is created automatically; more folders can be added from the gallery
       await useDrive();
     } catch (e) { App.handleError(e, 'Google Drive 연결 실패'); }
   }
@@ -233,7 +305,7 @@
         if (!name || !name.trim() || /[\\/:*?"<>|]/.test(name)) return;
         name = name.trim();
         if (L.folders.some(f => f.name === name)) throw new Error('같은 이름의 폴더가 이미 있어요');
-        S.opfsFolders = [...(S.opfsFolders && S.opfsFolders.length ? S.opfsFolders : [null]), name];
+        S.opfsFolders = [...(S.opfsFolders || []).filter(Boolean), name];
         await useOpfs();
       }
       if (name) U.toast(`"${name}" 폴더를 추가했어요`);
@@ -243,14 +315,15 @@
     const L = App.library, i = L.folders.findIndex(f => f.key === key);
     if (i < 0) return;
     if (L.folders.length === 1) { U.toast('마지막 폴더는 뺄 수 없어요'); return; }
+    if (L.root && i === 0) { U.toast('"새 노트"는 미니수첩 기본 폴더라 뺄 수 없어요'); return; }
     const ok = await U.dialog({
       title: `"${L.folders[i].name}" 폴더를 목록에서 뺄까요?`, body: '폴더와 이미지는 그대로 남고, 미니수첩 목록에서만 빠져요.',
       buttons: [{ label: '취소', value: false }, { label: '빼기', value: true, primary: true }],
     });
     if (!ok) return;
     if (S.source === 'local') { const hs = await localHandles(); hs.splice(i, 1); await U.idbSet('kv', 'localFolders', hs); }
-    else if (S.source === 'drive') S.driveFolders = driveFolders().filter((_, j) => j !== i);
-    else if (S.source === 'opfs') S.opfsFolders = (S.opfsFolders || [null]).filter((_, j) => j !== i);
+    else if (S.source === 'drive') S.driveFolders = driveFolders().filter((_, j) => j !== i - 1); // folder 0 is "새 노트"
+    else if (S.source === 'opfs') S.opfsFolders = (S.opfsFolders || []).filter(Boolean).filter((_, j) => j !== i - 1);
     if (S.folderFilter === key) S.folderFilter = 'all';
     App.saveSettings();
     await reopen();
@@ -464,23 +537,23 @@
     const prev = S.source;
     const kids = [];
     if (prev === 'local') {
-      const hs = await localHandles();
-      if (hs.length) {
+      const hs = await localHandles(), baseH = await U.idbGet('kv', 'baseDir');
+      if (hs.length || baseH) {
         const b = h('button', { class: 'home-btn primary', onclick: () => useLocal(true).then(ok => ok || U.toast('폴더 권한이 거부됐어요')), html: App.icon('folder') + '<span><b>이어서 열기</b><small></small></span>' });
-        b.querySelector('small').textContent = hs.map(x => x.name).join(', ');
+        b.querySelector('small').textContent = baseH ? `${baseH.name} › 미니수첩` : hs.map(x => x.name).join(', ');
         kids.push(b);
       }
     }
-    if (prev === 'drive' && driveFolders().length) {
+    if (prev === 'drive') {
       const b = h('button', {
         class: 'home-btn primary', html: App.icon('cloud') + '<span><b>이어서 열기 (Google Drive)</b><small></small></span>',
         onclick: async () => { try { await App.driveAuth.loadGis(); if (!App.driveAuth.valid()) await App.driveAuth.request(); await useDrive(); } catch (e) { App.handleError(e, '로그인 실패'); } },
       });
-      b.querySelector('small').textContent = driveFolders().map(x => x.name).join(', ');
+      b.querySelector('small').textContent = '내 드라이브 › 미니수첩';
       kids.push(b);
     }
-    if (window.showDirectoryPicker) kids.push(h('button', { class: 'home-btn', onclick: pickLocal, html: App.icon('folder') + '<span><b>PC 폴더 열기</b><small>구글 드라이브 동기화 폴더(G:)를 고르면 폰과 자동으로 공유돼요</small></span>' }));
-    kids.push(h('button', { class: 'home-btn', onclick: connectDrive, html: App.icon('cloud') + '<span><b>Google Drive 폴더 연결</b><small>폰·태블릿에서는 이 방법을 쓰세요</small></span>' }));
+    if (window.showDirectoryPicker) kids.push(h('button', { class: 'home-btn', onclick: pickLocal, html: App.icon('folder') + '<span><b>PC에서 시작</b><small>"내 드라이브"(구글 드라이브 동기화 폴더)를 고르면 그 안에 미니수첩 폴더를 만들어요</small></span>' }));
+    kids.push(h('button', { class: 'home-btn', onclick: connectDrive, html: App.icon('cloud') + '<span><b>Google Drive로 시작</b><small>폰·태블릿에서는 이 방법을 쓰세요 (내 드라이브 › 미니수첩)</small></span>' }));
     if (navigator.storage && navigator.storage.getDirectory) kids.push(h('button', { class: 'home-btn', onclick: () => useOpfs().catch(e => App.handleError(e)), html: App.icon('image') + '<span><b>앱 내부 저장소로 체험</b><small>설정 없이 바로 테스트 (이 기기 브라우저 안에만 저장)</small></span>' }));
     if (!App.isInstalled()) kids.push(h('button', { class: 'home-btn', onclick: () => App.install(), html: App.icon('download') + '<span><b>앱으로 설치</b><small>홈 화면 아이콘으로 바로 열고, 인터넷 없이도 실행돼요</small></span>' }));
     el.replaceChildren(...kids);
@@ -615,7 +688,7 @@
     try {
       if (S.source === 'local') { if (await useLocal(false)) return; }
       else if (S.source === 'opfs') { await useOpfs(); return; }
-      else if (S.source === 'drive' && driveFolders().length && App.driveAuth.valid()) { await useDrive(); return; }
+      else if (S.source === 'drive' && App.driveAuth.valid()) { await useDrive(); return; }
     } catch (e) { console.warn(e); }
     App.showHome();
   }
