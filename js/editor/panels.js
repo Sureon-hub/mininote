@@ -178,7 +178,8 @@
         sl('경도', 'hardness', 0, 1, 0.01, pct),
         sl('연필 질감', 'grain', 0, 1, 0.01, v => (v < 0.01 ? '없음' : pct(v))),
         sl('손떨림 보정', 'smoothing', 0, 0.95, 0.01, pct),
-        sl('간격', 'spacing', 0.02, 0.5, 0.01, pct),
+        sl('간격', 'spacing', 0.01, 0.5, 0.005, v => (v * 100).toFixed(1) + '%'),
+        ui.toggle({ label: '필압 → 농도 (약하게 누르면 흐리고 거칠게)', get: () => !!B.pFlow, set: v => { B.pFlow = v; } }),
         h('button', { class: 'btn small', onclick: () => { S.brushes[key] = JSON.parse(JSON.stringify(App.DEFAULTS.brushes[key])); App.saveSettings(); this.render(); ed.onBrushChanged(); } }, '이 브러시 초기화'));
 
       // pressure
@@ -257,6 +258,72 @@
           b('trash', '레이어 삭제', () => ed.deleteLayer())),
         this.props,
         this.list);
+      this.bindDrag();
+    }
+    // drag rows to reorder: mouse/pen drag anywhere on a row, finger drags the grip (≡) or long-presses a row
+    bindDrag() {
+      const list = this.list;
+      let d = null;
+      const rows = () => [...list.querySelectorAll('.ly')];
+      const begin = () => {
+        d.started = true;
+        const rs = rows();
+        d.rects = rs.map(r => r.getBoundingClientRect());
+        d.from = rs.indexOf(d.row);
+        d.rowH = d.rects[d.from].height + 3;
+        d.row.classList.add('dragging');
+        list.classList.add('sorting');
+        try { list.setPointerCapture(d.id); } catch { /* ignore */ }
+        if (d.touch) try { navigator.vibrate?.(15); } catch { /* ignore */ }
+      };
+      const cancelTimer = () => { if (d && d.timer) { clearTimeout(d.timer); d.timer = 0; } };
+      list.addEventListener('pointerdown', e => {
+        const row = e.target.closest('.ly');
+        if (!row || e.target.closest('.ly-eye') || e.button > 0) return;
+        const grip = !!e.target.closest('.ly-grip');
+        d = { row, id: e.pointerId, y0: e.clientY, x0: e.clientX, started: false, touch: e.pointerType === 'touch', grip };
+        if (d.touch && grip) { e.preventDefault(); begin(); }
+        else if (d.touch) d.timer = setTimeout(() => { if (d && !d.started) begin(); }, 380);
+      });
+      list.addEventListener('pointermove', e => {
+        if (!d || e.pointerId !== d.id) return;
+        const dy = e.clientY - d.y0;
+        if (!d.started) {
+          if (d.touch) { if (Math.hypot(dy, e.clientX - d.x0) > 8) { cancelTimer(); d = null; } return; }
+          if (Math.abs(dy) < 5) return;
+          begin();
+        }
+        d.row.style.transform = `translateY(${dy}px)`;
+        const c = d.rects[d.from].top + d.rects[d.from].height / 2 + dy;
+        let to = 0;
+        d.rects.forEach((r, i) => { if (i !== d.from && r.top + r.height / 2 < c) to++; });
+        d.to = to;
+        rows().forEach((r, i) => {
+          if (i === d.from) return;
+          let s = 0;
+          if (d.from < to && i > d.from && i <= to) s = -d.rowH;
+          if (d.from > to && i >= to && i < d.from) s = d.rowH;
+          r.style.transform = s ? `translateY(${s}px)` : '';
+        });
+      });
+      const end = e => {
+        if (!d || e.pointerId !== d.id) return;
+        cancelTimer();
+        const s = d; d = null;
+        if (!s.started) return;
+        list.classList.remove('sorting');
+        this.suppressClick = true;
+        setTimeout(() => { this.suppressClick = false; }, 50);
+        const n = this.ed.doc.layers.length;
+        const L = this.ed.doc.layers[n - 1 - s.from];
+        if (s.to != null && s.to !== s.from) this.ed.reorderLayer(L, n - 1 - s.to);
+        else this.render();
+      };
+      list.addEventListener('pointerup', end);
+      list.addEventListener('pointercancel', end);
+      // stop the panel from scrolling while a row is being dragged with a finger
+      list.addEventListener('touchmove', e => { if (d && d.started) e.preventDefault(); }, { passive: false });
+      list.addEventListener('contextmenu', e => { if (e.target.closest('.ly')) e.preventDefault(); });
     }
     thumb(L) {
       let t = this.thumbs.get(L);
@@ -279,8 +346,9 @@
           h('button', { class: 'ib ly-eye', title: '보이기/숨기기', html: App.icon(L.visible ? 'eye' : 'eyeOff'), onclick: e => { e.stopPropagation(); ed.setLayerProp(L, 'visible', !L.visible, true); } }),
           this.thumb(L),
           h('div', { class: 'ly-name' }, h('b', null, L.name),
-            h('small', null, `${Math.round(L.opacity * 100)}% · ${(App.BLENDS.find(b => b[0] === L.blend) || [0, '표준'])[1]}${L.alphaLock ? ' · 🔒' : ''}`)));
-        row.addEventListener('click', () => ed.selectLayer(L));
+            h('small', null, `${Math.round(L.opacity * 100)}% · ${(App.BLENDS.find(b => b[0] === L.blend) || [0, '표준'])[1]}${L.alphaLock ? ' · 🔒' : ''}`)),
+          h('span', { class: 'ly-grip', title: '끌어서 순서 바꾸기', html: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 9h14M5 15h14"/></svg>' }));
+        row.addEventListener('click', () => { if (!this.suppressClick) ed.selectLayer(L); });
         row.addEventListener('dblclick', () => ed.renameLayer(L));
         return row;
       }));

@@ -82,7 +82,7 @@
     return c;
   }
 
-  App.brush = { tip, tinted, grainCanvas };
+  App.brush = { tip, tinted, grainCanvas, grainValues: () => grainBase || (grainBase = makeGrainBase()) };
 
   // ---------------- a single stroke ----------------
   class Stroke {
@@ -98,12 +98,12 @@
       this.mbuf = bufs.masked; this.mctx = bufs.maskedCtx;
       this.tip = tinted(erase ? '#000000' : color, preset.hardness);
       this.spacing = U.clamp(preset.spacing || 0.06, 0.02, 1);
-      this.n = Math.max(1, 0.7 / this.spacing); // ~stamps covering a pixel near the centre line
+      // ~number of stamps whose solid core covers a pixel on the centre line
+      this.n = Math.max(1, Math.max(0.2, preset.hardness) * 0.8 / this.spacing);
       this.dirty = null; this.pending = null; this.last = null; this.acc = 0;
-      if (preset.grain > 0.01) {
-        // grain is fixed to the paper (like real pencil): overlapping strokes darken fibres, gaps stay light
-        this.grain = this.mctx.createPattern(grainCanvas(preset.grain), 'repeat');
-      }
+      // textured brush: grain is fixed to the paper and only eats into the thin (low-coverage) parts,
+      // so the core of a stroke stays dense and the edges / light pressure turn grainy (cream-pencil look)
+      if (preset.grain > 0.01) this.grain = App.brush.grainValues();
       const L = this.L;
       doc.preview = {
         layer: L,
@@ -118,7 +118,7 @@
     sizeAt(p) { return Math.max(0.5, this.p.size * (this.P.size ? U.lerp(this.P.minSize, 1, this.curve(p)) : 1)); }
     alphaAt(p) {
       let a = this.p.flow;
-      if (this.P.opacity) a *= U.lerp(this.P.minOpacity, 1, this.curve(p));
+      if (this.P.opacity || this.p.pFlow) a *= U.lerp(this.P.minOpacity, 1, this.curve(p));
       return 1 - Math.pow(1 - U.clamp(a, 0, 1), 1 / this.n);
     }
     stamp(x, y, p) {
@@ -159,10 +159,26 @@
       m.beginPath(); m.rect(x, y, w, h); m.clip();
       m.globalAlpha = 1;
       m.globalCompositeOperation = 'source-over';
-      m.clearRect(x, y, w, h);
-      m.drawImage(this.buf, x, y, w, h, x, y, w, h);
+      if (this.grain) {
+        // alpha = coverage pushed through a per-pixel threshold taken from the grain
+        const img = this.bctx.getImageData(x, y, w, h), d = img.data, G = this.grain, s = this.p.grain;
+        for (let yy = 0; yy < h; yy++) {
+          const gy = ((y + yy) & 255) << 8;
+          let i = yy * w * 4 + 3;
+          for (let xx = 0; xx < w; xx++, i += 4) {
+            const cov = d[i];
+            if (!cov) continue;
+            const t = (1 - G[gy | ((x + xx) & 255)]) * s;
+            const a = (cov / 255 - t) / (1.001 - t);
+            d[i] = a <= 0 ? 0 : a >= 1 ? 255 : a * 255;
+          }
+        }
+        m.putImageData(img, x, y);
+      } else {
+        m.clearRect(x, y, w, h);
+        m.drawImage(this.buf, x, y, w, h, x, y, w, h);
+      }
       m.globalCompositeOperation = 'destination-in';
-      if (this.grain) { m.fillStyle = this.grain; m.fillRect(x, y, w, h); }
       if (doc.selection) m.drawImage(doc.selection.mask, x, y, w, h, x, y, w, h);
       m.restore();
       this.dirty = U.rUnion(this.dirty, r);

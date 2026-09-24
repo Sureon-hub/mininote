@@ -271,6 +271,10 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; height:
 .ly-eye { width: 32px; height: 32px; }
 .ly-eye .ico { width: 18px; height: 18px; }
 .ly-thumb { width: 44px; height: 44px; border-radius: 6px; flex: none; background: repeating-conic-gradient(#e6e6ea 0 25%, #fff 0 50%) 0 0 / 10px 10px; box-shadow: inset 0 0 0 1px var(--line); }
+.ly-grip { margin-left: auto; width: 32px; height: 36px; display: grid; place-items: center; color: var(--muted); cursor: grab; touch-action: none; flex: none; }
+.ly-grip .ico { width: 18px; height: 18px; }
+.ly-list.sorting .ly { transition: transform .12s; }
+.ly-list.sorting .ly.dragging { transition: none; z-index: 2; position: relative; background: var(--surface); box-shadow: 0 6px 18px rgba(0,0,0,.3); cursor: grabbing; }
 .ly-name { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .ly-name b { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ly-name small { color: var(--muted); font-size: 11.5px; }

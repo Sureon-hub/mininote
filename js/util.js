@@ -202,9 +202,10 @@ window.App = window.App || {};
     color: '#3a3a3a',
     recentColors: [],
     currentBrush: 'pencil',
-    pressure: { gamma: 1.0, size: true, minSize: 0.45, opacity: false, minOpacity: 0.2 },
+    settingsVersion: 2,
+    pressure: { gamma: 1.0, size: true, minSize: 0.15, opacity: false, minOpacity: 0.25 },
     brushes: {
-      pencil: { name: '연필', size: 10, opacity: 1, flow: 0.85, hardness: 0.8, grain: 0.85, spacing: 0.06, smoothing: 0.3 },
+      pencil: { name: '연필', size: 16, opacity: 1, flow: 0.95, hardness: 0.35, grain: 0.8, spacing: 0.025, smoothing: 0.3, pFlow: true },
       pen: { name: '펜', size: 5, opacity: 1, flow: 1, hardness: 0.97, grain: 0, spacing: 0.05, smoothing: 0.45 },
       marker: { name: '마커', size: 28, opacity: 0.55, flow: 1, hardness: 0.92, grain: 0, spacing: 0.05, smoothing: 0.3 },
       air: { name: '에어브러시', size: 90, opacity: 0.6, flow: 0.12, hardness: 0, grain: 0, spacing: 0.08, smoothing: 0.2 },
@@ -226,6 +227,12 @@ window.App = window.App || {};
   try { saved = JSON.parse(localStorage.getItem('mininote.settings') || '{}'); } catch { saved = {}; }
   App.DEFAULTS = DEFAULTS;
   App.settings = merge(JSON.parse(JSON.stringify(DEFAULTS)), saved);
+  // v2: new dense "cream pencil" brush + clearly visible pressure taper
+  if ((saved.settingsVersion || 1) < 2) {
+    App.settings.brushes.pencil = JSON.parse(JSON.stringify(DEFAULTS.brushes.pencil));
+    App.settings.pressure = JSON.parse(JSON.stringify(DEFAULTS.pressure));
+    App.settings.settingsVersion = 2;
+  }
   App.saveSettings = U.debounce(() => {
     try { localStorage.setItem('mininote.settings', JSON.stringify(App.settings)); } catch { /* storage unavailable */ }
   }, 250);

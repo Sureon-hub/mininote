@@ -278,7 +278,7 @@
       const d = this.doc;
       if (!this.bufs || this.bufs.w !== d.w || this.bufs.h !== d.h) {
         const stroke = U.canvas(d.w, d.h), masked = U.canvas(d.w, d.h);
-        this.bufs = { w: d.w, h: d.h, stroke, masked, strokeCtx: stroke.getContext('2d'), maskedCtx: masked.getContext('2d') };
+        this.bufs = { w: d.w, h: d.h, stroke, masked, strokeCtx: stroke.getContext('2d', { willReadFrequently: true }), maskedCtx: masked.getContext('2d') };
       }
       return this.bufs;
     }
@@ -443,6 +443,11 @@
       const doc = this.doc, i = doc.layers.indexOf(doc.active), j = i + dir;
       if (j < 0 || j >= doc.layers.length) return;
       this.struct(() => { const L = doc.layers.splice(i, 1)[0]; doc.layers.splice(j, 0, L); });
+    }
+    reorderLayer(L, to) {
+      const doc = this.doc, from = doc.layers.indexOf(L);
+      if (from < 0 || to === from) return;
+      this.struct(() => { doc.layers.splice(from, 1); doc.layers.splice(to, 0, L); });
     }
     mergeDown() {
       const doc = this.doc, A = doc.active, i = doc.layers.indexOf(A);
