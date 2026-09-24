@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.9.6';
+  App.VERSION = '0.9.7';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -425,15 +425,8 @@
         if (!L.root && !(await App.setBaseFolder())) return;
         const R = App.library.root;
         const [fh] = await showOpenFilePicker({ id: 'mininote-open', startIn: R.handle, types: [{ description: '이미지', accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp'] } }] });
-        const rel = await R.handle.resolve(fh);
-        if (rel) entry = await App.library.resolveRel(rel);
-        else {
-          // outside the base folder: works on this PC only (the file itself is remembered in this browser)
-          if ((await fh.requestPermission({ mode: 'readwrite' })) !== 'granted') return;
-          const f = await fh.getFile();
-          entry = { kind: 'file', name: fh.name, handle: fh, mtime: f.lastModified, size: f.size, dir: { kind: 'dir', name: '외부 파일', external: true } };
-          U.toast('기준 폴더 밖의 파일이라 이 PC에서만 연결돼요');
-        }
+        entry = await entryFromHandle(fh);
+        if (!entry) return;
       }
       if (how === 'drive') {
         const f = await pickDriveFile();
@@ -442,10 +435,31 @@
         entry = Object.assign(f, { dir: { kind: 'dir', id: f.parentId, name: f.parentName, rel }, rel: rel ? [...rel, f.name] : null });
       }
       if (!entry) { U.toast('이미지를 찾지 못했어요'); return; }
-      const known = L.images.find(e => (e.id && e.id === entry.id) || (e.rel && entry.rel && e.rel.join('/') === entry.rel.join('/')));
-      App.editor.open([known || entry], 0);
+      App.editor.open([knownEntry(entry)], 0);
     } catch (e) { if (e.name !== 'AbortError') App.handleError(e, '이미지를 열지 못했어요'); }
   };
+  // the gallery's own entry for an image, when it is already listed
+  const knownEntry = entry => App.library.images.find(e => (e.id && e.id === entry.id) || (e.rel && entry.rel && e.rel.join('/') === entry.rel.join('/'))) || entry;
+  // PC: an image file picked or dropped → an entry that saves back into that very file (null = not allowed)
+  async function entryFromHandle(fh) {
+    const R = App.library.root;
+    const rel = R && R.handle ? await R.handle.resolve(fh) : null;
+    if (rel) return App.library.resolveRel(rel);
+    // outside the base folder: works on this PC only (the file itself is remembered in this browser)
+    const opts = { mode: 'readwrite' };
+    let st = await fh.queryPermission(opts);
+    if (st !== 'granted') st = await fh.requestPermission(opts).catch(() => 'prompt');
+    if (st !== 'granted') {
+      const ok = await U.dialog({
+        title: '원본 파일에 저장할까요?', body: `"${fh.name}"은(는) 기준 폴더 밖에 있어요. 편집한 내용을 이 파일에 바로 저장하려면 허용해 주세요.`,
+        buttons: [{ label: '취소', value: false }, { label: '허용', value: true, primary: true }],
+      });
+      if (!ok || (await fh.requestPermission(opts).catch(() => 'denied')) !== 'granted') return null;
+    }
+    const f = await fh.getFile();
+    U.toast('기준 폴더 밖의 파일이라 이 PC에서만 연결돼요');
+    return { kind: 'file', name: fh.name, handle: fh, mtime: f.lastModified, size: f.size, dir: { kind: 'dir', name: '외부 파일', external: true } };
+  }
 
   // ---- "폴더 열기": show where the original image lives ----
   App.openFolderOf = async e => {
@@ -732,7 +746,26 @@
     document.body.classList.remove('dropping');
     if (!e.dataTransfer) return;
     e.preventDefault();
-    App.receiveImages(await draggedImages(e.dataTransfer));
+    // PC, in the gallery: image files dropped from Explorer open as themselves, so saving edits that file
+    // (in the editor a dropped image still becomes a new layer). Handles must be asked for before any await.
+    const ed = App.editor;
+    const inPlace = S.source === 'local' && App.library.backend && !(ed.visible && ed.doc);
+    const hps = inPlace ? [...e.dataTransfer.items].filter(it => it.kind === 'file' && it.getAsFileSystemHandle && /^image\//.test(it.type)).map(it => it.getAsFileSystemHandle().catch(() => null)) : [];
+    const filesP = draggedImages(e.dataTransfer);
+    if (hps.length) {
+      const entries = [];
+      let declined = false;
+      try {
+        for (const fh of await Promise.all(hps)) {
+          if (!fh || fh.kind !== 'file') continue;
+          const en = await entryFromHandle(fh);
+          if (en) entries.push(knownEntry(en)); else declined = true;
+        }
+      } catch (err) { console.warn(err); }
+      if (entries.length) { App.editor.open(entries, 0); return; }
+      if (declined) return;
+    }
+    App.receiveImages(await filesP);
   });
   // "공유" from the phone's gallery: the service worker stores the files and reopens the app with ?share=N
   async function takeSharedImages() {
