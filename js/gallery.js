@@ -253,7 +253,7 @@
     openNote(list, idx) {
       if (App.settings.tapOpens === 'edit') App.editor.open(list, idx);
       else App.viewer.open(list, idx);
-    },
+    }
     async loadThumb(entry, tile) {
       if (entry.edited) {
         // edited view: find the linked image (follows moves); if it's gone, draw the edit file itself
