@@ -131,7 +131,7 @@
       this.dirty = null; this.pending = null; this.last = null; this.acc = 0;
       // textured brush: grain is fixed to the paper (cream-pencil look)
       this.grain = preset.grain > 0.01 ? App.brush.grainValues() : null;
-      doc.preview = { layer: L, apply: (sc, r) => this.draw(sc, r) };
+      doc.preview = { layer: L, apply: (sc, r) => this.draw(sc, r), liveBorder: true };
     }
     draw(c, r) {
       const w = r.x1 - r.x0, h = r.y1 - r.y0;

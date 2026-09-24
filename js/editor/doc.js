@@ -106,7 +106,8 @@
     }
 
     // Recompute a layer's border inside rect r (needs the layer's pixels up to `width` beyond r).
-    updateBorder(L, r) {
+    // srcFor(S) (optional) gives a context holding the pixels to outline in S – used for the live stroke
+    updateBorder(L, r, srcFor) {
       const B = L.border, W = this.w, H = this.h;
       if (!L.bcanvas) { L.bcanvas = U.canvas(W, H); L.bctx = L.bcanvas.getContext('2d'); }
       const wpx = Math.max(0.5, B.width);
@@ -115,7 +116,7 @@
       const S = U.rClamp({ x0: r.x0 - pad, y0: r.y0 - pad, x1: r.x1 + pad, y1: r.y1 + pad }, W, H);
       if (!S) return;
       const sw = S.x1 - S.x0, sh = S.y1 - S.y0, n = sw * sh;
-      const src = L.ctx.getImageData(S.x0, S.y0, sw, sh).data;
+      const src = (srcFor ? srcFor(S) : L.ctx).getImageData(S.x0, S.y0, sw, sh).data;
       let a = new Float32Array(n);
       for (let i = 0; i < n; i++) a[i] = src[i * 4 + 3] / 255;
       if (k > 0) a = boxBlur(a, sw, sh, k);
@@ -141,8 +142,27 @@
     }
     // bring border caches up to date; returns the (possibly enlarged) rect that must be recomposited
     syncBorders(r) {
+      const pv = this.preview;
       for (const L of this.layers) {
-        if (!L.border || !L.border.on) { L.bKey = null; continue; }
+        if (!L.border || !L.border.on) { L.bKey = null; L.bLive = null; continue; }
+        const live = pv && pv.liveBorder && pv.layer === L && L.bcanvas && L.bKey === borderKey(L.border);
+        if (live) {
+          // brush stroke in progress: outline the layer + the stroke so far, right away (only around r)
+          const g = Math.ceil(L.border.width) + 8;
+          const er = U.rClamp({ x0: r.x0 - g, y0: r.y0 - g, x1: r.x1 + g, y1: r.y1 + g }, this.w, this.h);
+          if (er) {
+            this.updateBorder(L, er, S => this.applyPreview(L, S).getContext('2d'));
+            L.bLive = L.bLive ? U.rUnion(L.bLive, er) : er;
+            r = U.rUnion(r, er);
+          }
+          continue;
+        }
+        if (L.bLive) {
+          // the stroke ended (drawn in or cancelled): redo the border where the live one was drawn
+          const lr = L.bLive;
+          L.bLive = null;
+          if (L.bKey === borderKey(L.border)) { this.updateBorder(L, lr); r = U.rUnion(r, lr); }
+        }
         const key = borderKey(L.border);
         if (L.bRev === L.rev && L.bKey === key) continue;
         const full = L.bKey !== key || !L.bcanvas;

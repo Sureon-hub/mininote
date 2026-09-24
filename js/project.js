@@ -13,14 +13,26 @@
   const MAGIC = 'MNOTE001';
 
   // ---------------- .mnote binary format ----------------
-  // [8 bytes magic][uint32 LE header length][header JSON][layer PNG blobs...]
+  // [8 bytes magic][uint32 LE header length][header JSON][layer image blobs...]
+  // Layers are lossless PNGs, except a background layer that is still exactly the original image: that one keeps
+  // the original file's bytes (e.g. the 1 MB JPG instead of a 10 MB PNG of it) – same pixels, much smaller file.
+  // fingerprint of a layer's pixels, to know whether it still is the untouched original
+  const pixelSum = L => {
+    const d = new Uint32Array(L.ctx.getImageData(0, 0, L.canvas.width, L.canvas.height).data.buffer);
+    let a = 0x811c9dc5 | 0, s = 0;
+    for (let i = 0; i < d.length; i++) { a = Math.imul(a ^ d[i], 16777619); s = (s + d[i]) | 0; }
+    return a + ':' + s;
+  };
+  const keepSource = (L, blob) => { L.src = blob; L.srcSum = pixelSum(L); };
   App.project = {
     EDIT_DIR, TRASH_DIR, EXT,
     async encode(doc, image) {
-      const blobs = await Promise.all(doc.layers.map(L => U.canvasToBlob(L.canvas, 'image/png')));
+      const blobs = await Promise.all(doc.layers.map(L =>
+        (L.src && L.src.size && pixelSum(L) === L.srcSum ? L.src : U.canvasToBlob(L.canvas, 'image/png'))));
       let off = 0;
       const layers = doc.layers.map((L, i) => {
         const m = { name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend, alphaLock: L.alphaLock, border: L.border, text: L.text || undefined, offset: off, length: blobs[i].size };
+        if (blobs[i] === L.src) m.fmt = L.src.type || 'image/jpeg';
         off += blobs[i].size;
         return m;
       });
@@ -44,9 +56,11 @@
         if (m.border) L.border = { ...L.border, ...m.border };
         if (m.text) L.text = m.text;
         if (m.length) {
-          const bmp = await createImageBitmap(new Blob([new Uint8Array(buf, base + m.offset, m.length)], { type: 'image/png' }));
+          const lb = new Blob([new Uint8Array(buf, base + m.offset, m.length)], { type: m.fmt || 'image/png' });
+          const bmp = await createImageBitmap(lb);
           L.ctx.drawImage(bmp, 0, 0);
           bmp.close?.();
+          if (m.fmt) keepSource(L, lb);
         }
         doc.layers.push(L);
       }
@@ -61,6 +75,7 @@
     const L = doc.createLayer('배경');
     L.ctx.drawImage(bmp, 0, 0);
     bmp.close?.();
+    if (blob.size) keepSource(L, blob.type ? blob : new Blob([blob], { type: U.mime(blob.name || '') }));
     // draw on an empty layer above the image, so the original stays untouched
     const L1 = doc.createLayer('레이어 1');
     doc.layers.push(L, L1);
