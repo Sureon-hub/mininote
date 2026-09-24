@@ -4,7 +4,9 @@
 // drawing, shortcuts, gallery layout) stay local on purpose.
 (() => {
   const NAME = '_미니수첩설정.json';
-  const pick = S => ({ brushes: S.brushes, favOrder: S.favOrder, recentColors: S.recentColors, text: S.text });
+  // `folders` = the image folder list as paths below 내 드라이브 ({at, list}); it has its own timestamp
+  const pick = S => ({ brushes: S.brushes, favOrder: S.favOrder, recentColors: S.recentColors, text: S.text, folders: S.sharedFolders });
+  const key = l => (l || []).map(r => r.join('/')).sort().join('|');
 
   const sync = App.sync = {
     NAME,
@@ -18,16 +20,40 @@
       if (!this.ready() || this.pulling) return;
       this.pulling = true;
       const L = App.library, S = App.settings;
+      let foldersIn = false;
       try {
         this.entry = await L.backend.find(L.appDir, NAME);
+        const j = this.entry ? JSON.parse(await (await L.backend.read(this.entry)).text()) : {};
+        const rf = j.data && j.data.folders;
+        foldersIn = this.mergeFolders(rf);
         if (!this.entry) { await this.push(true); return; }
-        const j = JSON.parse(await (await L.backend.read(this.entry)).text());
         const remoteAt = j.updatedAt || 0, localAt = S.syncLocalAt || 0;
         if (j.data && remoteAt > localAt) this.apply(j.data, remoteAt);
         else if (localAt > remoteAt) await this.push(true);
         else this.last = JSON.stringify(pick(S));
+        if (S.sharedFolders && S.sharedFolders.at > ((rf && rf.at) || 0)) await this.push(true);
       } catch (e) { console.warn('settings sync (pull):', e); }
       finally { this.pulling = false; }
+      if (foldersIn) await App.applySharedFolders?.();
+    },
+    // folder list: newest list wins; the first time on a device its own folders are added to the shared ones
+    mergeFolders(rf) {
+      const S = App.settings, lf = S.sharedFolders;
+      if (!lf) {
+        const mine = App.folderRels ? App.folderRels() : [];
+        const list = [...((rf && rf.list) || [])];
+        for (const r of mine) if (!list.some(x => x.join('/') === r.join('/'))) list.push(r);
+        const grew = list.length > ((rf && rf.list) || []).length;
+        S.sharedFolders = { at: grew ? Date.now() : (rf && rf.at) || 0, list };
+        App.saveSettings();
+        return !!(rf && rf.list.length);
+      }
+      if (rf && rf.at > lf.at) {
+        S.sharedFolders = rf;
+        App.saveSettings();
+        return key(rf.list) !== key(lf.list);
+      }
+      return false;
     },
     apply(data, at) {
       const S = App.settings;
@@ -45,7 +71,7 @@
     },
     // called after every settings save: upload the synced part a moment later if it changed
     changed() {
-      if (!this.ready()) return;
+      if (!this.ready() || this.pulling) return;
       if (JSON.stringify(pick(App.settings)) === this.last) return;
       App.settings.syncLocalAt = Date.now();
       clearTimeout(this.timer);

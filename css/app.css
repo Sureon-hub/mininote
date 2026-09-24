@@ -163,6 +163,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; height:
 .home-btn .ico { width: 28px; height: 28px; color: var(--accent); }
 .home-btn span { display: flex; flex-direction: column; }
 .home-btn small { color: var(--muted); }
+.home-note { color: var(--muted); font-size: 13px; line-height: 1.6; white-space: pre-line; margin: 4px 4px 0; }
 
 /* gallery */
 #gallery { background: var(--bg); }

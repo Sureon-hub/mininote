@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.9.1';
+  App.VERSION = '0.9.2';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -314,8 +314,54 @@
         S.opfsFolders = [...(S.opfsFolders || []).filter(Boolean), name];
         await useOpfs();
       }
-      if (name) U.toast(`"${name}" 폴더를 추가했어요`);
+      if (name) {
+        const f = L.folders.find(x => x.name === name);
+        if (f) shareFolder(await L.relOfDir(f), true);
+        U.toast(`"${name}" 폴더를 추가했어요`);
+      }
     } catch (e) { if (e.name !== 'AbortError') App.handleError(e, '폴더를 추가하지 못했어요'); }
+  };
+  // ---- the folder list is shared between devices (as paths below 내 드라이브) through the settings file ----
+  const NOTES_REL = [APP_HOME, APP_NEW].join('/');
+  App.folderRels = () => {
+    const L = App.library;
+    if (!L.root || S.source === 'opfs') return [];
+    return L.folders.map(f => f.rel).filter(r => r && r.length && r.join('/') !== NOTES_REL);
+  };
+  function shareFolder(rel, add) {
+    if (!rel || !App.library.root || S.source === 'opfs') return;
+    const k = rel.join('/');
+    const list = (S.sharedFolders ? S.sharedFolders.list : App.folderRels()).filter(r => r.join('/') !== k);
+    if (add) list.push(rel);
+    S.sharedFolders = { at: Date.now(), list };
+    App.saveSettings();
+  }
+  async function dirAt(b, root, rel) {
+    let d = root;
+    for (const n of rel) { d = await b.findDir(d, n, false); if (!d) return null; }
+    d.rel = rel;
+    return d;
+  }
+  // make this device's folder list match the shared one (folders that don't exist here are skipped)
+  App.applySharedFolders = async () => {
+    const L = App.library, sf = S.sharedFolders;
+    if (!sf || !L.root || S.source === 'opfs' || !L.backend) return;
+    const found = [];
+    for (const rel of sf.list) {
+      if (rel.join('/') === NOTES_REL || found.some(d => d.rel.join('/') === rel.join('/'))) continue;
+      const d = await dirAt(L.backend, L.root, rel).catch(() => null);
+      if (d) found.push(d);
+    }
+    const want = found.map(d => d.rel.join('/')).sort().join('|');
+    const have = App.folderRels().map(r => r.join('/')).sort().join('|');
+    if (want === have) return;
+    // folders outside 내 드라이브 can't be shared; they stay on this device
+    const own = L.folders.slice(1).filter(f => !f.rel);
+    if (S.source === 'drive') S.driveFolders = [...found.map(d => ({ id: d.id, name: d.name })), ...own.map(f => ({ id: f.id, name: f.name }))];
+    else await U.idbSet('kv', 'localFolders', [...found.map(d => d.handle), ...own.map(f => f.handle)]);
+    App.saveSettings();
+    U.toast('다른 기기에서 바꾼 폴더 목록을 적용했어요');
+    await reopen();
   };
   App.removeFolder = async key => {
     const L = App.library, i = L.folders.findIndex(f => f.key === key);
@@ -327,6 +373,7 @@
       buttons: [{ label: '취소', value: false }, { label: '빼기', value: true, primary: true }],
     });
     if (!ok) return;
+    shareFolder(await L.relOfDir(L.folders[i]), false);
     if (S.source === 'local') { const hs = await localHandles(); hs.splice(i, 1); await U.idbSet('kv', 'localFolders', hs); }
     else if (S.source === 'drive') S.driveFolders = driveFolders().filter((_, j) => j !== i - 1); // folder 0 is "새 노트"
     else if (S.source === 'opfs') S.opfsFolders = (S.opfsFolders || []).filter(Boolean).filter((_, j) => j !== i - 1);
@@ -537,27 +584,38 @@
   }
 
   // ---------------- home ----------------
-  App.showHome = async () => {
+  // Once set up, the storage is fixed: the home screen only asks for the one tap the browser needs
+  // (folder permission after a restart on PC, Google login after it expired). `choose` shows every option.
+  App.showHome = async choose => {
     App.show('home');
-    const el = U.$('#home-actions');
+    const el = U.$('#home-actions'), home = U.$('#home');
     const prev = S.source;
     const kids = [];
+    let resume = null, note = '';
     if (prev === 'local') {
       const hs = await localHandles(), baseH = await U.idbGet('kv', 'baseDir');
       if (hs.length || baseH) {
-        const b = h('button', { class: 'home-btn primary', onclick: () => useLocal(true).then(ok => ok || U.toast('폴더 권한이 거부됐어요')), html: App.icon('folder') + '<span><b>이어서 열기</b><small></small></span>' });
-        b.querySelector('small').textContent = baseH ? `${baseH.name} › 미니수첩` : hs.map(x => x.name).join(', ');
-        kids.push(b);
+        resume = h('button', { class: 'home-btn primary', onclick: () => useLocal(true).then(ok => ok || U.toast('폴더 권한이 거부됐어요')), html: App.icon('folder') + '<span><b>미니수첩 열기</b><small></small></span>' });
+        resume.querySelector('small').textContent = baseH ? `${baseH.name} › 미니수첩` : hs.map(x => x.name).join(', ');
+        note = '브라우저 보안 때문에 다시 켜면 폴더 접근을 한 번 허용해야 해요.\n허용 창에 "방문할 때마다 허용"이 보이면 그걸 고르세요 — 다음부터는 이 화면 없이 바로 열려요.';
       }
     }
     if (prev === 'drive') {
-      const b = h('button', {
-        class: 'home-btn primary', html: App.icon('cloud') + '<span><b>이어서 열기 (Google Drive)</b><small></small></span>',
+      resume = h('button', {
+        class: 'home-btn primary', html: App.icon('cloud') + '<span><b>미니수첩 열기</b><small>내 드라이브 › 미니수첩</small></span>',
         onclick: async () => { try { await App.driveAuth.loadGis(); if (!App.driveAuth.valid()) await App.driveAuth.request(); await useDrive(); } catch (e) { App.handleError(e, '로그인 실패'); } },
       });
-      b.querySelector('small').textContent = '내 드라이브 › 미니수첩';
-      kids.push(b);
+      note = 'Google 로그인은 1시간이 지나면 만료돼서, 그 뒤에 열 때는 한 번 눌러 다시 연결해요.';
     }
+    home.onclick = null;
+    if (resume && !choose) {
+      el.replaceChildren(resume, h('p', { class: 'home-note' }, note));
+      // a tap anywhere on the screen does the same
+      home.onclick = e => { if (!e.target.closest('button')) resume.click(); };
+      if (S.driveClientId) App.driveAuth.loadGis().catch(() => {});
+      return;
+    }
+    if (resume) kids.push(resume);
     // phones/tablets: Google Drive first; their system folder picker can't show Drive and blocks top-level folders
     const mobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
     const driveBtn = h('button', { class: 'home-btn' + (mobile && prev !== 'drive' ? ' primary' : ''), onclick: connectDrive, html: App.icon('cloud') + `<span><b>Google Drive로 시작</b><small>${mobile ? '휴대폰은 이걸 누르세요 — PC와 같은 "내 드라이브 › 미니수첩"을 써요' : '폰·태블릿에서 쓰는 방법 (내 드라이브 › 미니수첩)'}</small></span>` });
@@ -596,7 +654,7 @@
       h('div', { class: 'row' }, h('span', null, `이미지 폴더 ${App.library.folders.length}개: ${App.library.folders.map(f => f.name).join(', ') || '없음'}`)),
       h('div', { class: 'row' },
         h('button', { class: 'btn small', onclick: () => { back.remove(); App.addFolder(); } }, '폴더 추가'),
-        h('button', { class: 'btn small', onclick: () => { back.remove(); App.showHome(); } }, '저장소 바꾸기')),
+        h('button', { class: 'btn small', onclick: () => { back.remove(); App.showHome(true); } }, '저장 방식 바꾸기')),
       h('div', { class: 'row' }, h('span', null, `앱 폴더(편집파일 보관): ${App.library.appDir ? App.library.appDir.name + (App.library.appDir.ownerKey ? ` (${(App.library.folderByKey(App.library.appDir.ownerKey) || {}).name || ''} 안)` : '') : '없음'}`),
         h('button', { class: 'btn small', onclick: () => { back.remove(); App.changeAppFolder(); } }, '변경')),
       h('div', { class: 'row' }, h('span', null, `기준 폴더: ${App.library.root ? App.library.root.name : '없음 (이미지 열기·편집한 노트에 필요)'}`),
