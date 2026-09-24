@@ -199,14 +199,14 @@ window.App = window.App || {};
     fingerDraw: true,
     palmRejection: true,
     predict: false,
-    jpegQuality: 0.92,
+    jpegQuality: 0.95,
     newNote: { w: 1080, h: 1440, bg: '#ffffff' },
     color: '#1a1a1a',
     recentColors: [],
     currentBrush: 'pencil',
     favOrder: [],
     keys: {},
-    settingsVersion: 6,
+    settingsVersion: 7,
     text: { font: 'sans', size: 48, bold: false },
     pressure: { gamma: 1.0, size: true, minSize: 0.15, opacity: false, minOpacity: 0.25 },
     brushes: {
@@ -256,6 +256,8 @@ window.App = window.App || {};
     delete App.settings.brushes.air;
     if (App.settings.currentBrush === 'air') App.settings.currentBrush = 'pencil';
   }
+  // v7: default JPG quality 92% → 95% (only if it was never changed)
+  if (sv < 7 && App.settings.jpegQuality === 0.92) App.settings.jpegQuality = 0.95;
   App.settings.settingsVersion = DEFAULTS.settingsVersion;
   App.saveSettings = U.debounce(() => {
     try { localStorage.setItem('mininote.settings', JSON.stringify(App.settings)); } catch { /* storage unavailable */ }
