@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.3.3';
+  App.VERSION = '0.3.4';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -227,6 +227,7 @@
       h('h4', null, '그리기'),
       ui.toggle({ label: '손가락으로 그리기', get: () => S.fingerDraw, set: v => { S.fingerDraw = v; } }),
       ui.toggle({ label: '펜이 감지되면 손가락은 이동·확대 전용 (손바닥 인식 방지)', get: () => S.palmRejection, set: v => { S.palmRejection = v; } }),
+      ui.toggle({ label: '선 끝 예측 (반응이 빨라 보이지만, 선이 끌려오는 느낌이 들 수 있음)', get: () => S.predict, set: v => { S.predict = v; } }),
       h('p', { class: 'hint' }, '손가락 그리기가 꺼져 있으면 한 손가락으로 좌우로 밀어 다음 노트로 넘어가요. 두 손가락 탭 = 실행취소, 세 손가락 탭 = 다시 실행.'),
       h('h4', null, '저장'),
       ui.toggle({ label: '다른 노트로 넘어가거나 닫을 때 자동 저장', get: () => S.autosave, set: v => { S.autosave = v; } }),

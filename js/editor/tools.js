@@ -20,8 +20,32 @@
       this.straight = false;
       this.anchor = pt;
       this.armHold();
+      this.q = [{ x: pt.x, y: pt.y, p: pt.p }];
       this.stroke.add(pt.x, pt.y, pt.p);
       this.stroke.flush();
+    }
+    // Input points are joined with quadratic curves through their midpoints (instead of straight segments),
+    // so sparse samples from fast strokes don't show up as corners.
+    feed(x, y, p) {
+      const q = this.q;
+      q.push({ x, y, p });
+      if (q.length < 3) return;
+      const [a, b, c] = q.slice(-3);
+      const m1 = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, p: (a.p + b.p) / 2 };
+      const m2 = { x: (b.x + c.x) / 2, y: (b.y + c.y) / 2, p: (b.p + c.p) / 2 };
+      if (q.length === 3) this.stroke.add(m1.x, m1.y, m1.p);
+      const len = (Math.hypot(b.x - m1.x, b.y - m1.y) + Math.hypot(m2.x - b.x, m2.y - b.y)) * this.ed.z;
+      const n = U.clamp(Math.ceil(len / 3), 1, 32);
+      for (let i = 1; i <= n; i++) {
+        const t = i / n, u = 1 - t;
+        this.stroke.add(u * u * m1.x + 2 * u * t * b.x + t * t * m2.x, u * u * m1.y + 2 * u * t * b.y + t * t * m2.y, u * m1.p + t * m2.p);
+      }
+      q.shift();
+    }
+    finish(x, y, p) {
+      const q = this.q;
+      if (q.length === 2) { const [a, b] = q; this.stroke.add((a.x + b.x) / 2, (a.y + b.y) / 2, (a.p + b.p) / 2); }
+      this.stroke.add(x, y, p);
     }
     move(pt) {
       if (!this.stroke) return;
@@ -35,7 +59,7 @@
       this.sm.x += (pt.x - this.sm.x) * (1 - s);
       this.sm.y += (pt.y - this.sm.y) * (1 - s);
       this.lastP = pt.p;
-      this.stroke.add(this.sm.x, this.sm.y, pt.p);
+      this.feed(this.sm.x, this.sm.y, pt.p);
     }
     armHold() {
       clearTimeout(this.holdT);
@@ -64,11 +88,13 @@
         this.cur = pt;
         this.drawLine();
       } else {
-        // let the smoothed point catch up with the pen
-        for (let i = 1; i <= 6; i++) {
+        // let the smoothed point catch up with the pen, then close the curve at the final point
+        const s = U.clamp(this.preset.smoothing || 0, 0, 0.95);
+        if (s > 0.01) for (let i = 1; i <= 4; i++) {
           this.sm.x += (pt.x - this.sm.x) * 0.5; this.sm.y += (pt.y - this.sm.y) * 0.5;
-          this.stroke.add(this.sm.x, this.sm.y, this.lastP ?? pt.p);
+          this.feed(this.sm.x, this.sm.y, this.lastP ?? pt.p);
         }
+        this.finish(pt.x, pt.y, this.lastP ?? pt.p);
       }
       this.stroke.flush();
       this.stroke.commit();

@@ -197,6 +197,7 @@ window.App = window.App || {};
     autosave: true,
     fingerDraw: true,
     palmRejection: true,
+    predict: false,
     jpegQuality: 0.92,
     newNote: { w: 1080, h: 1440, bg: '#ffffff' },
     color: '#1a1a1a',

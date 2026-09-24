@@ -789,7 +789,7 @@
         for (const ce of evs.length ? evs : [e]) a.tool.move(this.ptOf(ce), e);
         a.tool.frame?.();
         // where the pen is about to be: drawn as a temporary tail so the line keeps up with the pen tip
-        this.predicted = a.tool.stroke && !a.tool.erase && e.getPredictedEvents ? e.getPredictedEvents().map(pe => this.ptOf(pe)) : null;
+        this.predicted = App.settings.predict && a.tool.stroke && !a.tool.erase && !a.tool.straight && e.getPredictedEvents ? e.getPredictedEvents().map(pe => this.ptOf(pe)) : null;
         a.lastPt = pt;
         if (e.pointerType !== 'touch') this.hover = pt;
         this.requestRender();
