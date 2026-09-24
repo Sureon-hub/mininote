@@ -189,6 +189,13 @@
       this.opts.hidden = !o.length;
       this.renderCtxbar();
     }
+    // brushes / favourites arrived from another device
+    onSettingsSynced() {
+      this.renderOpts();
+      this.qSize.sync(); this.qOpacity.sync();
+      if (this.dockBody.contains(this.pBrush.el)) this.pBrush.render();
+      if (this.dockBody.contains(this.pColor.el)) this.pColor.sync();
+    }
     // ---------- brushes & favourites ----------
     // built-in brushes first, then saved favourites (each favourite is a full brush preset + colour)
     brushKeys() {

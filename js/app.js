@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.6.0';
+  App.VERSION = '0.6.1';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -84,6 +84,8 @@
     App.gallery.render();
     await App.gallery.reload();
     if (App.pendingImages) { const b = App.pendingImages; App.pendingImages = null; App.receiveImages(b); }
+    App.sync.last = null; App.sync.entry = null;
+    App.sync.pull();
   }
   // A "collection" = several image folders + one app folder that holds all edit files.
   // local: folder handles live in IndexedDB; drive: {id,name} in settings; opfs: sub-folders of MiniNote.
@@ -371,6 +373,7 @@
       h('div', { class: 'row' }, h('span', null, `앱 폴더(편집파일 보관): ${App.library.appDir ? App.library.appDir.name + (App.library.appDir.ownerKey ? ` (${(App.library.folderByKey(App.library.appDir.ownerKey) || {}).name || ''} 안)` : '') : '없음'}`),
         h('button', { class: 'btn small', onclick: () => { back.remove(); App.changeAppFolder(); } }, '변경')),
       h('p', { class: 'hint' }, '여러 폴더의 이미지를 함께 보고 편집할 수 있어요. 저장하면 원본 이미지는 원래 폴더에서 바뀌고, 레이어가 살아있는 편집파일은 모두 앱 폴더 한 곳에 모여요. PC와 폰에서 같은 앱 폴더를 쓰면 편집파일도 함께 이어져요.'),
+      h('p', { class: 'hint' }, `기기 간 연동: 브러시 설정·즐겨찾기·최근 색·글꼴 설정은 앱 폴더의 "${App.sync.NAME}" 파일로 자동으로 맞춰져요. 필압·손가락 그리기·단축키·갤러리 보기는 기기마다 따로예요.`),
       h('h4', null, '그리기'),
       ui.toggle({ label: '손가락으로 그리기', get: () => S.fingerDraw, set: v => { S.fingerDraw = v; } }),
       ui.toggle({ label: '펜이 감지되면 손가락은 이동·확대 전용 (손바닥 인식 방지)', get: () => S.palmRejection, set: v => { S.palmRejection = v; } }),

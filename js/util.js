@@ -259,5 +259,6 @@ window.App = window.App || {};
   App.settings.settingsVersion = DEFAULTS.settingsVersion;
   App.saveSettings = U.debounce(() => {
     try { localStorage.setItem('mininote.settings', JSON.stringify(App.settings)); } catch { /* storage unavailable */ }
+    App.sync?.changed();
   }, 250);
 })();
