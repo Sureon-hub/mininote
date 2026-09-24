@@ -47,6 +47,7 @@
       this.list = []; this.idx = -1;
       this.cache = new Map();        // entry -> Promise<{doc, ctx}> preloaded neighbours
       this.pendingSaves = new Map(); // entry -> Promise of a background save
+      this.ops = new Set();          // unfinished edits that a save must wait for (a photo being put in)
       this.pBrush = new App.ui.BrushPanel(this);
       this.pColor = new App.ui.ColorPanel(this);
       this.pLayers = new App.ui.LayersPanel(this);
@@ -408,6 +409,7 @@
       doc.renderComposite(null);
       this.resize(true);
       this.updateTitle();
+      this.updateSaveBtn();
       this.pLayers.render();
       this.renderOpts();
       if (this.toolName === 'transform') this.setTool('brush');
@@ -492,6 +494,13 @@
     }
     async save() {
       if (!this.doc || this.saving) return false;
+      // a photo still being put in (big photos take a while on phones) must be in the saved note
+      if (this.ops.size) {
+        this.saving = true;
+        U.toast('사진을 넣는 중이에요 — 다 들어가면 저장할게요');
+        try { await Promise.all(this.ops); } finally { this.saving = false; }
+        if (!this.doc) return false;
+      }
       if (this.textEd) await App.text.commit(this);
       if (this.action) this.cancelAction(true);
       this.tools.transform.commit();
@@ -501,7 +510,6 @@
       const entry = (this.idx >= 0 && this.list[this.idx]) || ctx.image || ctx;
       const prev = this.pendingSaves.get(entry);
       this.saving = true;
-      this.btnSave.classList.add('busy');
       let snapped;
       const snapP = new Promise(r => { snapped = r; });
       const run = async () => {
@@ -523,15 +531,23 @@
         }
         return false;
       };
+      const slow = setTimeout(() => U.toast('저장하는 중이에요 (큰 사진은 조금 걸려요) — 그동안 계속 작업해도 돼요'), 1500);
       const p = run().finally(() => {
-        if (this.pendingSaves.get(entry) === p) { this.pendingSaves.delete(entry); this.btnSave.classList.remove('busy'); }
+        clearTimeout(slow);
+        if (this.pendingSaves.get(entry) === p) this.pendingSaves.delete(entry);
+        if (ctx.savingP === p) ctx.savingP = null;
+        this.updateSaveBtn();
       });
       this.pendingSaves.set(entry, p);
+      ctx.savingP = p;
+      this.updateSaveBtn();
       this.cache.delete(entry);
       await snapP;
       this.saving = false;
       return p;
     }
+    // the save button blinks only while the note on screen is being saved
+    updateSaveBtn() { this.btnSave.classList.toggle('busy', !!(this.ctx && this.ctx.savingP)); }
 
     // ================= history / changes =================
     pushHistory(e) { this.history.push(e); }
@@ -707,9 +723,16 @@
       U.toast(cut ? '잘라냈어요' : '복사했어요');
     }
     async pasteImage(blobOrCanvas, at) {
+      const op = this.pasteNow(blobOrCanvas, at);
+      this.ops.add(op);
+      const t = setTimeout(() => U.toast('사진을 넣는 중…'), 400);
+      try { return await op; } finally { clearTimeout(t); this.ops.delete(op); }
+    }
+    async pasteNow(blobOrCanvas, at) {
       const doc = this.doc;
       let src = blobOrCanvas;
       if (src instanceof Blob) src = await createImageBitmap(src);
+      if (this.doc !== doc) return; // moved on to another note meanwhile
       const w = src.width, hh = src.height;
       const s = Math.min(1, doc.w / w, doc.h / hh);
       this.struct(() => {
