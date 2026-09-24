@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.8.0';
+  App.VERSION = '0.9.0';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -13,6 +13,7 @@
   };
   window.addEventListener('popstate', async () => {
     if (App._ignorePop) { App._ignorePop = false; return; }
+    if (!App.editor.visible && App.gallery.selecting) { App.gallery.exitSelect(true); return; }
     if (App.editor.visible) {
       const ok = await App.editor.close();
       if (!ok) history.pushState({ editor: true }, '');

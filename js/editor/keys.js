@@ -29,10 +29,17 @@
       ['view.zoomIn', '확대', ['ctrl+=']], ['view.zoomOut', '축소', ['ctrl+-']], ['view.fit', '화면에 맞추기 (회전 초기화)', ['ctrl+0']],
       ['view.actual', '실제 크기 100%', ['ctrl+1']], ['view.rotL', '왼쪽으로 15° 회전', ['q']], ['view.rotR', '오른쪽으로 15° 회전', ['w']],
       ['view.rotReset', '회전 초기화', ['r']], ['note.prev', '이전 노트', ['arrowleft']], ['note.next', '다음 노트', ['arrowright']],
-      ['panel.layers', '레이어 패널', ['f7']], ['panel.brush', '브러시 패널', ['f5']], ['panel.color', '색상 패널', ['f6']],
+      ['panel.layers', '레이어 패널', ['f7']], ['panel.brush', '브러시 패널', ['f8']], ['panel.color', '색상 패널', ['f6']],
+    ]],
+    // shown on the gallery (main screen); same keys may mean something else in the editor
+    ['갤러리 (메인 화면)', [
+      ['gallery.refresh', '새로고침', ['ctrl+r', 'f5']], ['gallery.selectAll', '전체 선택', ['ctrl+a']],
+      ['gallery.delete', '선택한 노트를 휴지통으로', ['delete']], ['gallery.deleteProj', '선택한 노트의 편집파일만 삭제', ['shift+delete']],
+      ['gallery.new', '새 노트', ['n']], ['gallery.openImage', '이미지 열기', ['o']],
     ]],
   ];
   const ALL = ACTIONS.flatMap(([, list]) => list);
+  const scopeOf = id => (id.startsWith('gallery.') ? 'gallery' : 'editor');
 
   const CODE = {
     BracketLeft: '[', BracketRight: ']', Minus: '-', Equal: '=', Comma: ',', Period: '.', Slash: '/', Semicolon: ';',
@@ -63,18 +70,19 @@
     if (user !== undefined) return user ? [user] : [];
     return (ALL.find(a => a[0] === id) || [0, 0, []])[2];
   };
-  let index = null;
+  let index = null; // scope -> Map(combo -> action)
   const buildIndex = () => {
-    index = new Map();
-    for (const [id] of ALL) for (const c of combosFor(id)) if (!index.has(c)) index.set(c, id);
+    index = { editor: new Map(), gallery: new Map() };
+    for (const [id] of ALL) for (const c of combosFor(id)) { const m = index[scopeOf(id)]; if (!m.has(c)) m.set(c, id); }
   };
 
   App.keys = {
     ACTIONS, comboOf, pretty, combosFor,
-    actionFor(combo) { if (!combo) return null; if (!index) buildIndex(); return index.get(combo) || null; },
+    actionFor(combo, scope = 'editor') { if (!combo) return null; if (!index) buildIndex(); return index[scope].get(combo) || null; },
     set(id, combo) {
       const K = App.settings.keys || (App.settings.keys = {});
-      if (combo) for (const [other] of ALL) if (other !== id && combosFor(other).includes(combo)) K[other] = combosFor(other).filter(c => c !== combo)[0] || '';
+      // a key can only mean one thing per screen: take it away from the other action on the same screen
+      if (combo) for (const [other] of ALL) if (other !== id && scopeOf(other) === scopeOf(id) && combosFor(other).includes(combo)) K[other] = combosFor(other).filter(c => c !== combo)[0] || '';
       K[id] = combo;
       index = null;
       App.saveSettings();
@@ -102,7 +110,7 @@
         if (e.key === 'Escape') { capture = null; render(); return; }
         const c = comboOf(e);
         if (!c) return; // modifier only – wait for the real key
-        const clash = ALL.find(([other]) => other !== capture.id && combosFor(other).includes(c));
+        const clash = ALL.find(([other]) => other !== capture.id && scopeOf(other) === scopeOf(capture.id) && combosFor(other).includes(c));
         this.set(capture.id, c);
         if (clash) U.toast(`"${clash[1]}"에서 ${pretty(c)}를 빼고 옮겼어요`);
         capture = null;

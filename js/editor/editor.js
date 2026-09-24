@@ -1090,7 +1090,11 @@
       }
       // user-configurable keys (설정 → 단축키)
       const act = App.keys.actionFor(combo);
-      if (!act) return;
+      if (!act) {
+        // don't let a browser reload throw away the drawing
+        if (combo === 'ctrl+r' || combo === 'f5') { stop(); U.toast('편집 중에는 새로고침이 꺼져 있어요 (갤러리에서 쓸 수 있어요)'); }
+        return;
+      }
       stop();
       this.runAction(act);
     }

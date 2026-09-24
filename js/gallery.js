@@ -16,11 +16,117 @@
       this.io = new IntersectionObserver(es => {
         for (const en of es) if (en.isIntersecting) { this.io.unobserve(en.target); this.enqueue(en.target); }
       }, { root: this.scroll, rootMargin: '800px 0px' });
+      this.sel = new Set(); this.selecting = false; this.anchor = null;
       this.buildBar();
+      this.selBar = h('header', { class: 'bar g-bar g-selbar', hidden: true });
+      this.root.append(this.selBar);
       this.bindScroll();
       this.bindPinch();
+      this.bindKeys();
       new ResizeObserver(() => this.applyCols()).observe(this.scroll);
       U.$('#g-new').addEventListener('click', () => App.editor.openNew());
+    }
+
+    // ---------- multi-select ----------
+    // phone: long-press a note → selection mode (tap to toggle) · PC: Ctrl+click / Shift+click / Ctrl+A
+    tileOf(entry) { return [...this.grid.children].find(t => t.entry === entry) || null; }
+    enterSelect(entry) {
+      if (!this.selecting) {
+        this.selecting = true;
+        this.root.classList.add('selecting');
+        history.pushState({ gsel: true }, ''); // phone back button leaves selection mode
+      }
+      if (entry) this.toggle(entry, true);
+      this.renderSelBar();
+    }
+    exitSelect(fromPop) {
+      if (!this.selecting) return;
+      this.selecting = false;
+      this.sel.clear();
+      this.anchor = null;
+      this.root.classList.remove('selecting');
+      this.grid.querySelectorAll('.tile.sel').forEach(t => t.classList.remove('sel'));
+      this.selBar.hidden = true;
+      if (!fromPop && history.state && history.state.gsel) { App._ignorePop = true; history.back(); }
+    }
+    toggle(entry, on) {
+      const v = on ?? !this.sel.has(entry);
+      if (v) this.sel.add(entry); else this.sel.delete(entry);
+      this.tileOf(entry)?.classList.toggle('sel', v);
+      this.anchor = entry;
+    }
+    selectRange(entry) {
+      const list = App.library.visible();
+      const a = list.indexOf(this.anchor), b = list.indexOf(entry);
+      if (a < 0) { this.toggle(entry, true); return; }
+      for (let i = Math.min(a, b); i <= Math.max(a, b); i++) this.toggle(list[i], true);
+      this.anchor = entry;
+    }
+    selectAll() {
+      const list = App.library.visible();
+      const all = list.length && list.every(e => this.sel.has(e));
+      list.forEach(e => this.toggle(e, !all));
+      this.renderSelBar();
+    }
+    renderSelBar() {
+      if (!this.selecting) return;
+      const L = App.library, items = [...this.sel], n = items.length;
+      const withProj = items.filter(e => e.edited || L.projectOf(e)).length;
+      const images = items.filter(e => !e.edited).length;
+      const all = n && L.visible().every(e => this.sel.has(e));
+      this.selBar.hidden = false;
+      this.selBar.replaceChildren(...[
+        U.iconBtn('x', '선택 끝내기 (Esc)', () => this.exitSelect()),
+        h('div', { class: 'g-title' }, h('b', null, n ? `${n}개 선택` : '노트 선택'), h('small', null, 'PC: Ctrl+클릭 · Shift+클릭 · Ctrl+A')),
+        h('div', { class: 'grow' }),
+        h('button', { class: 'btn small', onclick: () => this.selectAll() }, all ? '전체 해제' : '전체 선택'),
+        n === 1 && U.iconBtn('more', '더보기 (이름 바꾸기·폴더 열기·정보)', e => { const t = this.tileOf(items[0]); if (t) { const r = e.currentTarget.getBoundingClientRect(); this.tileMenu(t, r.right - 220, r.bottom + 4); } }),
+        withProj > 0 && h('button', { class: 'btn small', title: '원본 이미지는 그대로 두고 편집 기록만 지워요', onclick: () => this.bulkDelete('proj') }, `편집파일 삭제${withProj !== n ? ` (${withProj})` : ''}`),
+        images > 0 && h('button', { class: 'btn small danger', title: '이미지와 편집파일을 휴지통으로', onclick: () => this.bulkDelete('trash') }, `휴지통${images !== n ? ` (${images})` : ''}`),
+      ].filter(Boolean));
+    }
+    async bulkDelete(mode) {
+      const L = App.library, items = [...this.sel];
+      let targets, title, body;
+      if (mode === 'proj') {
+        targets = items.map(e => (e.edited ? e.project : L.projectOf(e))).filter(Boolean);
+        title = `편집파일 ${targets.length}개를 삭제할까요?`;
+        body = '레이어 편집 기록만 지워요. 원본 이미지는 그대로 남아요.';
+      } else {
+        targets = items.filter(e => !e.edited);
+        title = `노트 ${targets.length}개를 휴지통으로 옮길까요?`;
+        body = `이미지와 편집파일을 ${L.backend.trashToFolder ? `각 폴더의 "${App.project.TRASH_DIR}" 폴더로` : 'Google Drive 휴지통으로'} 옮겨요.`;
+      }
+      if (!targets.length) return;
+      const ok = await U.dialog({ title, body, buttons: [{ label: '취소', value: false }, { label: mode === 'proj' ? '편집파일 삭제' : '휴지통으로', value: true, danger: true, primary: true }] });
+      if (!ok) return;
+      this.setBusy(true);
+      let done = 0, failed = 0;
+      for (const t of targets) {
+        try { if (mode === 'proj') await L.deleteProject(t); else await L.trash(t); done++; }
+        catch (e) { if (e.auth) { App.handleError(e); break; } failed++; console.warn(e); }
+      }
+      this.setBusy(false);
+      this.exitSelect();
+      this.render();
+      U.toast(`${done}개 ${mode === 'proj' ? '편집파일을 지웠어요 (원본은 그대로)' : '휴지통으로 옮겼어요'}${failed ? ` · ${failed}개 실패` : ''}`);
+    }
+    bindKeys() {
+      window.addEventListener('keydown', e => {
+        if (this.root.hidden || document.querySelector('.modal-back, .menu-back')) return;
+        if (e.target.matches && e.target.matches('input,textarea,select')) return;
+        const combo = App.keys.comboOf(e);
+        if (combo === 'escape' && this.selecting) { e.preventDefault(); this.exitSelect(); return; }
+        const act = App.keys.actionFor(combo, 'gallery');
+        if (!act) return;
+        e.preventDefault();
+        if (act === 'gallery.refresh') this.reload();
+        else if (act === 'gallery.selectAll') { this.enterSelect(); this.selectAll(); }
+        else if (act === 'gallery.delete') { if (this.sel.size) this.bulkDelete('trash'); }
+        else if (act === 'gallery.deleteProj') { if (this.sel.size) this.bulkDelete('proj'); }
+        else if (act === 'gallery.new') App.editor.openNew();
+        else if (act === 'gallery.openImage') App.openAnyImage();
+      });
     }
     buildBar() {
       this.btnUp = U.iconBtn('back', '저장소 선택', () => App.showHome());
@@ -95,10 +201,14 @@
         else this.io.observe(tile);
         if (L.hasProject(entry)) tile.append(h('span', { class: 'badge', title: '편집파일 있음', html: App.icon('layers') }));
         if (entry.missing) tile.classList.add('missing');
+        tile.append(h('span', { class: 'chk' }));
+        if (this.sel.has(entry)) tile.classList.add('sel');
         frag.append(tile);
       });
       this.grid.replaceChildren(frag);
       this.empty.hidden = list.length > 0;
+      // selection only keeps notes that are still shown
+      if (this.selecting) { for (const e of [...this.sel]) if (!list.includes(e)) this.sel.delete(e); this.renderSelBar(); }
       this.applyCols();
       if (focusEntry) {
         const t = [...this.grid.children].find(x => x.entry === focusEntry);
@@ -208,26 +318,44 @@
         lastY = y;
       }, { passive: true });
 
-      // tap = open, long-press / right click = menu
+      // tap = open (or toggle while selecting) · long-press = start selecting · right click = menu
+      // Ctrl/⌘+click = toggle · Shift+click = select a range
       let press = null;
       this.grid.addEventListener('pointerdown', e => {
         const tile = e.target.closest('.tile');
         if (!tile || e.button > 0) return;
-        press = { tile, x: e.clientX, y: e.clientY, t: setTimeout(() => { press = null; this.tileMenu(tile, e.clientX, e.clientY); }, 520) };
+        press = {
+          tile, x: e.clientX, y: e.clientY, t: setTimeout(() => {
+            press.long = true;
+            try { navigator.vibrate?.(15); } catch { /* ignore */ }
+            if (!this.selecting) this.enterSelect(tile.entry);
+            else { this.toggle(tile.entry); this.renderSelBar(); }
+          }, 480),
+        };
       });
       const cancel = () => { if (press) { clearTimeout(press.t); press = null; } };
-      this.grid.addEventListener('pointermove', e => { if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) cancel(); });
+      this.grid.addEventListener('pointermove', e => { if (press && !press.long && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) cancel(); });
       this.grid.addEventListener('pointercancel', cancel);
       this.grid.addEventListener('pointerup', e => {
         if (!press) return;
-        const tile = press.tile;
+        const { tile, long } = press;
         cancel();
-        if (this.pinching) return;
-        { const list = App.library.visible(); App.editor.open(list, list.indexOf(tile.entry)); }
+        if (long || this.pinching) return;
+        const entry = tile.entry;
+        if (e.shiftKey) { this.enterSelect(); this.selectRange(entry); this.renderSelBar(); return; }
+        if (this.selecting || e.ctrlKey || e.metaKey) {
+          this.enterSelect();
+          this.toggle(entry);
+          if (!this.sel.size && !(e.ctrlKey || e.metaKey)) this.exitSelect(); else this.renderSelBar();
+          return;
+        }
+        const list = App.library.visible();
+        App.editor.open(list, list.indexOf(entry));
       });
       this.grid.addEventListener('contextmenu', e => {
-        const tile = e.target.closest('.tile');
         e.preventDefault();
+        if (e.pointerType === 'touch' || e.pointerType === 'pen') return; // long-press is handled above
+        const tile = e.target.closest('.tile');
         cancel();
         if (tile) this.tileMenu(tile, e.clientX, e.clientY);
       });
@@ -267,6 +395,7 @@
         { label: entry.name, value: null },
         '-',
         { label: '열기', value: 'open' },
+        !this.selecting && { label: '선택 (여러 개 고르기)', value: 'select' },
         { label: '이미지가 있는 폴더 열기', value: 'folder' },
         !entry.edited && { label: '이름 바꾸기', value: 'rename' },
         { label: '정보', value: 'info' },
@@ -275,7 +404,8 @@
         !entry.edited && { label: `이미지와 편집파일을 ${L.backend.trashToFolder ? '휴지통 폴더로' : 'Drive 휴지통으로'}`, value: 'trash', danger: true },
       ], x, y);
       try {
-        if (v === 'open') { const list = L.visible(); App.editor.open(list, list.indexOf(entry)); }
+        if (v === 'open') { this.exitSelect(true); const list = L.visible(); App.editor.open(list, list.indexOf(entry)); }
+        else if (v === 'select') this.enterSelect(entry);
         else if (v === 'folder') App.openFolderOf(entry);
         else if (v === 'delproj') {
           const ok = await U.dialog({ title: '편집파일만 삭제할까요?', body: `"${entry.name}"의 레이어 편집 기록만 지워요. 원본 이미지는 그대로 남아요.`, buttons: [{ label: '취소', value: false }, { label: '편집파일 삭제', value: true, danger: true, primary: true }] });
