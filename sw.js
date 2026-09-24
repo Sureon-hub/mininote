@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Bump VERSION when files change.
-const VERSION = 'mininote-v0.9.3';
+const VERSION = 'mininote-v0.9.4';
 const FILES = [
   './', 'index.html', 'css/app.css', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png',
   'js/util.js', 'js/storage.js', 'js/editor/doc.js', 'js/editor/brush.js', 'js/editor/tools.js',

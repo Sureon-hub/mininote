@@ -55,6 +55,8 @@ window.App = window.App || {};
   U.baseName = n => n.replace(/\.[^.]+$/, '');
   U.pad = n => String(n).padStart(2, '0');
   U.stamp = (d = new Date()) => `${d.getFullYear()}${U.pad(d.getMonth() + 1)}${U.pad(d.getDate())}_${U.pad(d.getHours())}${U.pad(d.getMinutes())}${U.pad(d.getSeconds())}`;
+  // file names of new notes: 20260925(금)_001227
+  U.noteStamp = (d = new Date()) => `${d.getFullYear()}${U.pad(d.getMonth() + 1)}${U.pad(d.getDate())}(${"일월화수목금토"[d.getDay()]})_${U.pad(d.getHours())}${U.pad(d.getMinutes())}${U.pad(d.getSeconds())}`;
   U.fmtDate = ms => { if (!ms) return ''; const d = new Date(ms); return `${d.getFullYear()}.${U.pad(d.getMonth() + 1)}.${U.pad(d.getDate())} ${U.pad(d.getHours())}:${U.pad(d.getMinutes())}`; };
   U.hash = async blob => {
     const b = new Uint8Array(await blob.arrayBuffer());

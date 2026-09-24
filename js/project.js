@@ -349,13 +349,13 @@
       const L1 = doc.createLayer('레이어 1');
       doc.layers.push(L0, L1);
       doc.active = L1;
-      const ctx = { backend: this.backend, dir: this.targetFolder(), image: null, name: `note_${U.stamp()}.png`, project: null };
+      const ctx = { backend: this.backend, dir: this.targetFolder(), image: null, name: `${U.noteStamp()}_미니노트.png`, project: null };
       return { doc, ctx };
     },
     // a new note whose background is an image (shared from another app, dropped, picked…)
     async newDocFromImage(blob) {
       const doc = await docFromImageBlob(blob);
-      const ctx = { backend: this.backend, dir: this.targetFolder(), image: null, name: `image_${U.stamp()}.png`, project: null };
+      const ctx = { backend: this.backend, dir: this.targetFolder(), image: null, name: `${U.noteStamp()}_가져온이미지.png`, project: null };
       return { doc, ctx };
     },
 
