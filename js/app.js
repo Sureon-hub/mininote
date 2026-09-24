@@ -2,22 +2,28 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.9.11';
+  App.VERSION = '0.9.12';
 
   // ---------------- screens ----------------
   App.show = name => {
-    for (const id of ['home', 'gallery', 'editor']) U.$('#' + id).hidden = id !== name;
-    if (name === 'editor' && !(history.state && history.state.editor)) history.pushState({ editor: true }, '');
-    if (name !== 'editor' && history.state && history.state.editor) { App._ignorePop = true; history.back(); }
+    for (const id of ['home', 'gallery', 'viewer', 'editor']) U.$('#' + id).hidden = id !== name;
+    // history: gallery ← viewer ← editor, so the phone's back button steps back one screen at a time
+    const st = history.state || {};
+    if (name === 'editor') { if (!st.editor) history.pushState({ viewer: !!st.viewer, editor: true }, ''); }
+    else if (name === 'viewer') {
+      if (st.editor && st.viewer) { App._ignorePop = true; history.back(); }
+      else if (st.editor) history.replaceState({ viewer: true }, '');
+      else if (!st.viewer) history.pushState({ viewer: true }, '');
+    } else if (st.editor || st.viewer) { App._ignorePop = true; history.go(st.editor && st.viewer ? -2 : -1); }
     if (name === 'editor') requestAnimationFrame(() => App.editor.resize());
   };
   window.addEventListener('popstate', async () => {
     if (App._ignorePop) { App._ignorePop = false; return; }
-    if (!App.editor.visible && App.gallery.selecting) { App.gallery.exitSelect(true); return; }
+    if (!App.editor.visible && !App.viewer.visible && App.gallery.selecting) { App.gallery.exitSelect(true); return; }
     if (App.editor.visible) {
       const ok = await App.editor.close();
-      if (!ok) history.pushState({ editor: true }, '');
-    }
+      if (!ok) history.pushState({ viewer: !!App.editor.fromViewer, editor: true }, '');
+    } else if (App.viewer.visible) App.viewer.close();
   });
   window.addEventListener('beforeunload', e => {
     if ((App.editor.visible && App.editor.dirty) || App.editor.pendingSaves.size) { e.preventDefault(); e.returnValue = ''; }
@@ -684,6 +690,7 @@
       h('p', { class: 'hint' }, '손가락 그리기가 꺼져 있으면 한 손가락으로 좌우로 밀어 다음 노트로 넘어가요. 두 손가락 탭 = 실행취소, 세 손가락 탭 = 다시 실행.'),
       h('h4', null, '저장'),
       ui.toggle({ label: '다른 노트로 넘어가거나 닫을 때 자동 저장', get: () => S.autosave, set: v => { S.autosave = v; } }),
+      ui.toggle({ label: '노트를 누르면 먼저 보기 화면으로 (한 번 더 탭·펜 터치로 편집)', get: () => S.tapOpens !== 'edit', set: v => { S.tapOpens = v ? 'view' : 'edit'; } }),
       ui.slider({ label: 'JPG 품질', min: 0.6, max: 1, step: 0.01, get: () => S.jpegQuality, set: v => { S.jpegQuality = v; }, fmt: v => Math.round(v * 100) + '%' }),
       h('h4', null, '새 노트'),
       h('div', { class: 'row' }, wIn, '×', hIn, 'px', bgIn),

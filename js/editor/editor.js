@@ -324,7 +324,8 @@
     }
 
     // ================= document lifecycle =================
-    async open(list, idx) {
+    async open(list, idx, opts = {}) {
+      this.fromViewer = !!opts.fromViewer; // back returns to the viewer
       this.list = list; this.idx = idx;
       App.show('editor');
       await this.loadIndex(idx);
@@ -451,8 +452,8 @@
         this.doc = null; this.ctx = null; this.bufs = null;
         this.cache.clear();
         this.history.clear();
-        App.show('gallery');
-        App.gallery.render(cur);
+        if (this.fromViewer && this.idx >= 0) App.viewer.resume(this.list, this.idx);
+        else { App.show('gallery'); App.gallery.render(cur); }
         return true;
       } finally { this.closing = false; }
     }
@@ -494,26 +495,42 @@
       if (this.textEd) await App.text.commit(this);
       if (this.action) this.cancelAction(true);
       this.tools.transform.commit();
+      // the note is copied first (a moment), then encoding + uploading run in the background: drawing,
+      // swiping and leaving stay possible (opening this note again waits for the save)
+      const doc = this.doc, ctx = this.ctx;
+      const entry = (this.idx >= 0 && this.list[this.idx]) || ctx.image || ctx;
+      const prev = this.pendingSaves.get(entry);
       this.saving = true;
       this.btnSave.classList.add('busy');
-      try {
+      let snapped;
+      const snapP = new Promise(r => { snapped = r; });
+      const run = async () => {
+        await prev;
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
-            await App.library.save(this.doc, this.ctx);
-            this.dirty = false;
-            if (this.idx < 0) { this.list = App.library.visible(); this.idx = this.list.indexOf(this.ctx.image); }
-            this.updateTitle();
+            await App.library.save(doc, ctx, () => { if (this.ctx === ctx) this.dirty = false; snapped(); });
+            if (this.ctx === ctx) {
+              if (this.idx < 0) { this.list = App.library.visible(); this.idx = this.list.indexOf(ctx.image); }
+              this.updateTitle();
+            }
+            App.gallery.refreshEntry?.(ctx.image);
             U.toast('저장됨 · 원본 이미지와 편집파일이 모두 갱신됐어요');
             return true;
           } catch (e) {
-            if ((await App.handleError(e, '저장 실패')) !== 'retry') return false;
+            snapped();
+            if ((await App.handleError(e, '저장 실패')) !== 'retry') { if (this.ctx === ctx) this.dirty = true; return false; }
           }
         }
         return false;
-      } finally {
-        this.saving = false;
-        this.btnSave.classList.remove('busy');
-      }
+      };
+      const p = run().finally(() => {
+        if (this.pendingSaves.get(entry) === p) { this.pendingSaves.delete(entry); this.btnSave.classList.remove('busy'); }
+      });
+      this.pendingSaves.set(entry, p);
+      this.cache.delete(entry);
+      await snapP;
+      this.saving = false;
+      return p;
     }
 
     // ================= history / changes =================

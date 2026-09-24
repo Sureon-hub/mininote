@@ -373,3 +373,18 @@ body.dropping::after {
 .g-selbar .btn.small { padding: 6px 10px; }
 #gallery.selecting .fab { display: none; }
 @media (max-width: 480px) { .g-selbar .g-title small { display: none; } }
+
+/* ---------- quick viewer ---------- */
+#viewer { background: #0e0e10; }
+.v-bar .v-count { color: var(--muted); font-size: 12px; margin-right: 4px; white-space: nowrap; }
+.v-stage { position: relative; flex: 1; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+.v-track { position: absolute; inset: 0; will-change: transform; }
+.v-slide { position: absolute; top: 0; bottom: 0; width: 100%; display: flex; align-items: center; justify-content: center; }
+.v-slide:nth-child(1) { left: -100%; }
+.v-slide:nth-child(2) { left: 0; }
+.v-slide:nth-child(3) { left: 100%; }
+.v-slide img { max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: center; -webkit-user-drag: none; pointer-events: none; }
+.v-slide.empty img { display: none; }
+.v-hint { position: absolute; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: rgba(0,0,0,.6); color: #fff; font-size: 13px; padding: 7px 12px; border-radius: 16px; pointer-events: none; opacity: 0; transition: opacity .3s; white-space: nowrap; }
+#viewer.first-time .v-hint { opacity: 1; animation: vhint 4s forwards; }
+@keyframes vhint { 0%, 80% { opacity: 1; } 100% { opacity: 0; } }

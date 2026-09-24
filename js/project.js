@@ -26,17 +26,26 @@
   const keepSource = (L, blob) => { L.src = blob; L.srcSum = pixelSum(L); };
   App.project = {
     EDIT_DIR, TRASH_DIR, EXT,
-    async encode(doc, image) {
-      const blobs = await Promise.all(doc.layers.map(L =>
-        (L.src && L.src.size && pixelSum(L) === L.srcSum ? L.src : U.canvasToBlob(L.canvas, 'image/png'))));
-      let off = 0;
-      const layers = doc.layers.map((L, i) => {
-        const m = { name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend, alphaLock: L.alphaLock, border: L.border, text: L.text || undefined, offset: off, length: blobs[i].size };
+    // the layers as they are right now (canvas.toBlob copies the pixels immediately), so editing can go on
+    // while the save is still running
+    snapshot(doc) {
+      const blobs = doc.layers.map(L => (L.src && L.src.size && pixelSum(L) === L.srcSum ? L.src : U.canvasToBlob(L.canvas, 'image/png')));
+      const metas = doc.layers.map((L, i) => {
+        const m = { name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend, alphaLock: L.alphaLock, border: { ...L.border }, text: L.text ? { ...L.text } : undefined };
         if (blobs[i] === L.src) m.fmt = L.src.type || 'image/jpeg';
+        return m;
+      });
+      return { w: doc.w, h: doc.h, active: doc.layers.indexOf(doc.active), metas, blobs: Promise.all(blobs) };
+    },
+    async encode(doc, image, snap = this.snapshot(doc)) {
+      const blobs = await snap.blobs;
+      let off = 0;
+      const layers = snap.metas.map((m, i) => {
+        m = { ...m, offset: off, length: blobs[i].size };
         off += blobs[i].size;
         return m;
       });
-      const header = { app: 'mininote', version: 1, width: doc.w, height: doc.h, active: doc.layers.indexOf(doc.active), image, savedAt: Date.now(), layers };
+      const header = { app: 'mininote', version: 1, width: snap.w, height: snap.h, active: snap.active, image, savedAt: Date.now(), layers };
       const hb = new TextEncoder().encode(JSON.stringify(header));
       const pre = new Uint8Array(12);
       pre.set(new TextEncoder().encode(MAGIC));
@@ -524,15 +533,19 @@
     // a new note whose background is an image (shared from another app, dropped, picked…)
     async newDocFromImage(blob) {
       const doc = await docFromImageBlob(blob);
-      const ctx = { backend: this.backend, dir: this.targetFolder(), image: null, name: `${U.noteStamp()}_가져온이미지.png`, project: null };
+      // keep the photo's own format: a JPG stays JPG (a PNG of a photo is many times bigger and slow to save on phones)
+      const ext = ({ 'image/jpeg': 'jpg', 'image/webp': 'webp' })[blob.type] || 'png';
+      const ctx = { backend: this.backend, dir: this.targetFolder(), image: null, name: `${U.noteStamp()}_가져온이미지.${ext}`, project: null };
       return { doc, ctx };
     },
 
     // -------- save: overwrite the image where it lives + write the edit file into the app folder --------
-    async save(doc, ctx) {
+    // onSnap: called once the note has been copied (from then on the editor may go on changing the doc)
+    async save(doc, ctx, onSnap) {
       const b = ctx.backend;
       if (!this.appDir) throw new Error('앱 폴더(편집파일 보관 위치)가 없어요');
       const flat = doc.flatten();
+      const snap = App.project.snapshot(doc);
       const mime = U.mime(ctx.name);
       let out = flat;
       if (mime === 'image/jpeg') {
@@ -540,7 +553,9 @@
         const c = out.getContext('2d');
         c.fillStyle = '#fff'; c.fillRect(0, 0, doc.w, doc.h); c.drawImage(flat, 0, 0);
       }
-      const imgBlob = await U.canvasToBlob(out, mime, mime === 'image/png' ? undefined : App.settings.jpegQuality);
+      const imgP = U.canvasToBlob(out, mime, mime === 'image/png' ? undefined : App.settings.jpegQuality);
+      onSnap?.();
+      const imgBlob = await imgP;
       const hash = await U.hash(imgBlob);
       // on this PC the original may have been moved since it was opened: writing to the old handle would
       // bring it back to the old place, so find where it went first (Drive files follow moves by id)
@@ -567,7 +582,7 @@
       const projBlob = await App.project.encode(doc, {
         name: ctx.name, folder: ctx.dir.name, rel, driveId: b.kind === 'drive' ? ctx.image.id : undefined,
         mtime: written.mtime, size: written.size || imgBlob.size, hash,
-      });
+      }, snap);
       ctx.project = await b.write(this.appDir, projName, projBlob, existing);
       this.projects.set(projName, ctx.project);
       if (ctx.dir.external && ctx.image.handle) U.idbSet('kv', 'ext:' + projName, ctx.image.handle);

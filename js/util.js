@@ -198,6 +198,7 @@ window.App = window.App || {};
     gridAspect: '3/4',         // '1' | '3/4' | 'fit'
     sort: 'mtime-desc',
     autosave: true,
+    tapOpens: 'view', // gallery tap: 'view' (quick viewer first) or 'edit'
     fingerDraw: true,
     palmRejection: true,
     predict: false,

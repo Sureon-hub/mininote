@@ -249,6 +249,11 @@
         }).finally(() => { this.running--; this.pump(); });
       }
     }
+    // tapping a note: the quick viewer first (tap again / pen → edit), or straight to the editor (setting)
+    openNote(list, idx) {
+      if (App.settings.tapOpens === 'edit') App.editor.open(list, idx);
+      else App.viewer.open(list, idx);
+    },
     async loadThumb(entry, tile) {
       if (entry.edited) {
         // edited view: find the linked image (follows moves); if it's gone, draw the edit file itself
@@ -350,7 +355,7 @@
           return;
         }
         const list = App.library.visible();
-        App.editor.open(list, list.indexOf(entry));
+        this.openNote(list, list.indexOf(entry));
       });
       this.grid.addEventListener('contextmenu', e => {
         e.preventDefault();
@@ -361,7 +366,7 @@
       });
       this.grid.addEventListener('keydown', e => {
         const tile = e.target.closest('.tile');
-        if (tile && e.key === 'Enter') { const list = App.library.visible(); App.editor.open(list, list.indexOf(tile.entry)); }
+        if (tile && e.key === 'Enter') { const list = App.library.visible(); this.openNote(list, list.indexOf(tile.entry)); }
       });
     }
     bindPinch() {
