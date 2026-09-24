@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.6.1';
+  App.VERSION = '0.7.0';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -129,7 +129,11 @@
       S.appOwner = appDir.ownerKey;
       await U.idbSet('kv', 'localAppDir', appDir.handle);
     }
-    App.library.setup(b, folders, appDir);
+    // base folder (e.g. "내 드라이브"): edit files remember their images by path below it
+    let root = null;
+    const baseH = await U.idbGet('kv', 'baseDir');
+    if (baseH && (await permitted([baseH], interactive).catch(() => false))) root = { kind: 'dir', name: baseH.name, handle: baseH, path: '/r' };
+    App.library.setup(b, folders, appDir, root);
     S.source = 'local'; App.saveSettings();
     await U.idbSet('kv', 'localFolders', hs);
     await enterGallery();
@@ -148,7 +152,7 @@
     }
     const appDir = await b.findDir(folders[0], APP_DIR, true);
     appDir.ownerKey = folders[0].key;
-    App.library.setup(b, folders, appDir);
+    App.library.setup(b, folders, appDir, { kind: 'dir', name: '앱 내부 저장소', handle: hd, path: '/r' });
     S.source = 'opfs'; App.saveSettings();
     await enterGallery();
   }
@@ -168,7 +172,8 @@
       appDir.ownerKey = folders[0].key;
       S.driveAppDir = { id: appDir.id, name: appDir.name, ownerKey: appDir.ownerKey };
     }
-    App.library.setup(b, folders, appDir);
+    // on Drive the base folder is always "내 드라이브" (the same place as G:\...\내 드라이브 on the PC)
+    App.library.setup(b, folders, appDir, { kind: 'dir', id: 'root', name: '내 드라이브' });
     S.source = 'drive'; App.saveSettings();
     await enterGallery();
     return true;
@@ -250,6 +255,101 @@
     App.saveSettings();
     await reopen();
   };
+  // ---- base folder (PC): one top folder, e.g. "내 드라이브", so any image below it can be opened and replaced ----
+  App.setBaseFolder = async () => {
+    if (S.source !== 'local') { U.toast(S.source === 'drive' ? 'Google Drive에서는 "내 드라이브"가 기준이에요' : '앱 내부 저장소는 기준 폴더를 바꿀 수 없어요'); return false; }
+    const ok = await U.dialog({
+      title: '기준 폴더 고르기',
+      body: '미니수첩이 이미지를 찾고 바꿀 수 있는 가장 바깥 폴더를 한 번만 골라주세요.\n추천: 구글 드라이브 동기화 폴더의 "내 드라이브" — 그러면 폰(Google Drive)과 경로가 똑같아서 편집파일 연결이 이어져요.',
+      buttons: [{ label: '취소', value: false }, { label: '폴더 고르기', value: true, primary: true }],
+    });
+    if (!ok) return false;
+    try {
+      const hd = await showDirectoryPicker({ id: 'mininote-base', mode: 'readwrite' });
+      await U.idbSet('kv', 'baseDir', hd);
+      await reopen();
+      U.toast(`기준 폴더: ${hd.name}`);
+      return true;
+    } catch (e) { if (e.name !== 'AbortError') App.handleError(e, '기준 폴더를 정하지 못했어요'); return false; }
+  };
+
+  // ---- "이미지 열기": any image, wherever it is ----
+  App.openAnyImage = async btn => {
+    const L = App.library;
+    if (!L.backend) { U.toast('먼저 저장 위치를 열어주세요'); return; }
+    let how = S.source === 'local' ? 'pc' : S.source === 'drive' ? null : 'copy';
+    if (!how) {
+      const r = btn ? btn.getBoundingClientRect() : { right: innerWidth / 2 + 100, bottom: 60 };
+      how = await U.menu([
+        { label: 'Google Drive에서 고르기 (저장하면 원본이 바뀌어요)', value: 'drive' },
+        { label: '휴대폰 사진에서 가져오기 (복사본으로 새 노트)', value: 'copy' },
+      ], r.right - 260, r.bottom + 4);
+      if (!how) return;
+    }
+    try {
+      let entry = null;
+      if (how === 'copy') {
+        const inp = U.h('input', { type: 'file', accept: 'image/*', style: { display: 'none' } });
+        inp.addEventListener('change', () => { App.receiveImages([...inp.files]); inp.remove(); });
+        document.body.append(inp); inp.click();
+        U.toast('휴대폰 사진은 원본을 바꿀 수 없어서, 복사본으로 새 노트를 만들어요');
+        return;
+      }
+      if (how === 'pc') {
+        if (!L.root && !(await App.setBaseFolder())) return;
+        const R = App.library.root;
+        const [fh] = await showOpenFilePicker({ id: 'mininote-open', startIn: R.handle, types: [{ description: '이미지', accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp'] } }] });
+        const rel = await R.handle.resolve(fh);
+        if (rel) entry = await App.library.resolveRel(rel);
+        else {
+          // outside the base folder: works on this PC only (the file itself is remembered in this browser)
+          if ((await fh.requestPermission({ mode: 'readwrite' })) !== 'granted') return;
+          const f = await fh.getFile();
+          entry = { kind: 'file', name: fh.name, handle: fh, mtime: f.lastModified, size: f.size, dir: { kind: 'dir', name: '외부 파일', external: true } };
+          U.toast('기준 폴더 밖의 파일이라 이 PC에서만 연결돼요');
+        }
+      }
+      if (how === 'drive') {
+        const f = await pickDriveFile();
+        if (!f) return;
+        const b = L.backend, rel = await b.pathFromRoot(f.parentId);
+        entry = Object.assign(f, { dir: { kind: 'dir', id: f.parentId, name: f.parentName, rel }, rel: rel ? [...rel, f.name] : null });
+      }
+      if (!entry) { U.toast('이미지를 찾지 못했어요'); return; }
+      const known = L.images.find(e => (e.id && e.id === entry.id) || (e.rel && entry.rel && e.rel.join('/') === entry.rel.join('/')));
+      App.editor.open([known || entry], 0);
+    } catch (e) { if (e.name !== 'AbortError') App.handleError(e, '이미지를 열지 못했어요'); }
+  };
+
+  // ---- "폴더 열기": show where the original image lives ----
+  App.openFolderOf = async e => {
+    const L = App.library;
+    const real = e && e.edited ? await L.resolveEdited(e, true) : e;
+    if (!real) { U.toast('원본 이미지를 찾지 못했어요'); return; }
+    if (L.backend.kind === 'drive') {
+      const id = (real.dir && real.dir.id) || real.parentId;
+      window.open(`https://drive.google.com/drive/folders/${id}`, '_blank'); // opens the Drive app on phones
+      return;
+    }
+    if (L.backend.kind === 'opfs') { U.toast('앱 내부 저장소는 탐색기로 열 수 없어요'); return; }
+    const rel = L.relOf(real);
+    if (!rel) { U.toast(L.root ? '기준 폴더 밖의 파일이라 위치를 알 수 없어요' : '설정에서 기준 폴더를 먼저 정해주세요'); return; }
+    if (!S.basePath || !S.explorerHelper) {
+      const path = await U.dialog({
+        title: '탐색기로 열기 준비 (한 번만)',
+        body: U.h('div', null,
+          U.h('p', null, `1) 미니수첩 폴더의 "탐색기 연결 설치.bat"을 한 번 실행해 주세요. (웹앱은 보안상 탐색기를 직접 못 열어서, 작은 연결 프로그램이 필요해요)`),
+          U.h('p', null, `2) 기준 폴더 "${L.root.name}"의 실제 경로를 적어주세요. 탐색기 주소창에서 복사하면 돼요.`)),
+        input: { value: S.basePath || '', placeholder: '예) G:\\구글드라이브 PC동기화폴더\\내 드라이브' },
+        buttons: [{ label: '취소', value: null }, { label: '저장하고 열기', value: true, primary: true }],
+      });
+      if (!path || !/^[A-Za-z]:\\/.test(path.trim())) { if (path) U.toast('C:\\ 처럼 드라이브 문자로 시작하는 경로를 적어주세요'); return; }
+      S.basePath = path.trim(); S.explorerHelper = true; App.saveSettings();
+    }
+    const abs = S.basePath.replace(/[\\/]+$/, '') + '\\' + rel.join('\\');
+    location.href = 'mininote-open:' + encodeURIComponent(abs);
+  };
+
   // choose a different app folder (where all edit files are kept)
   App.changeAppFolder = async () => {
     try {
@@ -277,6 +377,42 @@
     });
     if (id && id.trim()) { S.driveClientId = id.trim(); App.saveSettings(); App.driveAuth.loadGis().catch(() => {}); return S.driveClientId; }
     return null;
+  }
+
+  // Drive image browser: walk folders, tap an image → {id, name, mtime, size, parentId, parentName}
+  function pickDriveFile() {
+    const b = App.library.backend;
+    const stack = [{ id: 'root', name: '내 드라이브' }];
+    return new Promise(res => {
+      const back = h('div', { class: 'modal-back' });
+      const pathEl = h('div', { class: 'df-path' });
+      const list = h('div', { class: 'df-list' });
+      const done = v => { back.remove(); res(v); };
+      const load = async () => {
+        const cur = stack[stack.length - 1];
+        pathEl.textContent = stack.map(s => s.name).join(' / ');
+        list.replaceChildren(h('div', { class: 'spinner' }));
+        try {
+          const { folders, images } = await b.listForPicker(cur.id);
+          const item = (icon, label, onclick, cls = '') => { const x = h('button', { class: 'df-item ' + cls, onclick, html: App.icon(icon) + '<span></span>' }); x.querySelector('span').textContent = label; return x; };
+          list.replaceChildren(
+            ...(stack.length > 1 ? [item('back', '상위 폴더', () => { stack.pop(); load(); }, 'up')] : []),
+            ...folders.map(f => item('folder', f.name, () => { stack.push(f); load(); })),
+            ...images.map(f => item('image', f.name, () => done(Object.assign(f, { parentId: cur.id === 'root' ? null : cur.id, parentName: cur.name })), 'img')));
+          if (!folders.length && !images.length) list.append(h('p', { class: 'hint' }, '비어 있어요'));
+        } catch (e) { list.replaceChildren(h('p', { class: 'hint' }, e.message)); }
+      };
+      back.append(h('div', { class: 'modal wide' },
+        h('h3', null, '이미지 열기 (Google Drive)'),
+        h('p', { class: 'hint' }, '편집하고 저장하면 이 원본 이미지가 바뀌어요. 편집파일은 앱 폴더에 모여요.'),
+        pathEl, list,
+        h('div', { class: 'modal-btns' }, h('button', { class: 'btn', onclick: () => done(null) }, '취소'))));
+      document.body.append(back);
+      load();
+    }).then(async f => {
+      if (f && !f.parentId) f.parentId = await b.rootId(); // images directly in "내 드라이브"
+      return f;
+    });
   }
 
   // Drive folder browser
@@ -364,6 +500,12 @@
     const cid = h('input', { class: 'field', value: S.driveClientId, placeholder: 'xxxx.apps.googleusercontent.com' });
     cid.addEventListener('change', () => { S.driveClientId = cid.value.trim(); App.saveSettings(); if (S.driveClientId) App.driveAuth.loadGis().catch(() => {}); });
 
+    // PC only: the real path of the base folder, used to open Explorer at an image (see "탐색기 연결 설치.bat")
+    const basePathRow = () => {
+      const inp = h('input', { class: 'field', value: S.basePath || '', placeholder: '예) G:\\구글드라이브 PC동기화폴더\\내 드라이브' });
+      inp.addEventListener('change', () => { S.basePath = inp.value.trim(); S.explorerHelper = !!S.basePath; App.saveSettings(); });
+      return h('label', { class: 'fieldrow' }, h('span', null, '기준 폴더의 실제 경로 (탐색기로 열기용)'), inp);
+    };
     const body = h('div', { class: 'settings' },
       h('h4', null, '저장 위치'),
       h('div', { class: 'row' }, h('span', null, `이미지 폴더 ${App.library.folders.length}개: ${App.library.folders.map(f => f.name).join(', ') || '없음'}`)),
@@ -372,6 +514,10 @@
         h('button', { class: 'btn small', onclick: () => { back.remove(); App.showHome(); } }, '저장소 바꾸기')),
       h('div', { class: 'row' }, h('span', null, `앱 폴더(편집파일 보관): ${App.library.appDir ? App.library.appDir.name + (App.library.appDir.ownerKey ? ` (${(App.library.folderByKey(App.library.appDir.ownerKey) || {}).name || ''} 안)` : '') : '없음'}`),
         h('button', { class: 'btn small', onclick: () => { back.remove(); App.changeAppFolder(); } }, '변경')),
+      h('div', { class: 'row' }, h('span', null, `기준 폴더: ${App.library.root ? App.library.root.name : '없음 (이미지 열기·편집한 노트에 필요)'}`),
+        S.source === 'local' && h('button', { class: 'btn small', onclick: () => { back.remove(); App.setBaseFolder(); } }, App.library.root ? '변경' : '정하기')),
+      S.source === 'local' && basePathRow(),
+      h('p', { class: 'hint' }, '기준 폴더 아래의 이미지는 "이미지 열기"로 어디서든 열 수 있고, 편집파일이 원본 위치를 기억해요. 원본을 다른 폴더로 옮겨도 다시 찾아서 연결을 고쳐요. PC는 "내 드라이브"(구글 드라이브 동기화 폴더)를 고르면 폰과 경로가 같아져요.'),
       h('p', { class: 'hint' }, '여러 폴더의 이미지를 함께 보고 편집할 수 있어요. 저장하면 원본 이미지는 원래 폴더에서 바뀌고, 레이어가 살아있는 편집파일은 모두 앱 폴더 한 곳에 모여요. PC와 폰에서 같은 앱 폴더를 쓰면 편집파일도 함께 이어져요.'),
       h('p', { class: 'hint' }, `기기 간 연동: 브러시 설정·즐겨찾기·최근 색·글꼴 설정은 앱 폴더의 "${App.sync.NAME}" 파일로 자동으로 맞춰져요. 필압·손가락 그리기·단축키·갤러리 보기는 기기마다 따로예요.`),
       h('h4', null, '그리기'),

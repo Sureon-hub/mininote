@@ -301,14 +301,19 @@
         { label: '이미지 다운로드 (PNG)', value: 'export' },
         { label: '편집파일 다운로드 (.mnote)', value: 'exportProj' },
         { label: `캔버스 정보 (${this.doc ? this.doc.w + '×' + this.doc.h : ''})`, value: 'info' },
+        this.ctx && this.ctx.image && { label: '이미지가 있는 폴더 열기', value: 'folder' },
         '-',
         { label: '설정', value: 'settings' },
       ]);
-      if (v === 'fit') this.fit();
+      if (v === 'folder') App.openFolderOf(this.ctx.image);
+      else if (v === 'fit') this.fit();
       else if (v === '100') this.zoomAt(this.stage.clientWidth / 2, this.stage.clientHeight / 2, 1 / this.z);
       else if (v === 'export') U.download(await U.canvasToBlob(this.doc.flatten()), U.baseName(this.ctx.name) + '.png');
       else if (v === 'exportProj') U.download(await App.project.encode(this.doc, { name: this.ctx.name }), this.ctx.name + App.project.EXT);
-      else if (v === 'info') U.dialog({ title: '캔버스 정보', body: `${this.ctx.name}\n${this.doc.w} × ${this.doc.h}px · 레이어 ${this.doc.layers.length}개\n저장 위치: ${App.library.backend?.label || ''}` });
+      else if (v === 'info') {
+        const rel = this.ctx.image && App.library.relOf(this.ctx.image);
+        U.dialog({ title: '캔버스 정보', body: `${this.ctx.name}\n${this.doc.w} × ${this.doc.h}px · 레이어 ${this.doc.layers.length}개\n원본 위치: ${rel ? rel.join(' / ') : this.ctx.dir.name}` });
+      }
       else if (v === 'settings') App.openSettings();
     }
     showLoading(on, entry) {
@@ -373,12 +378,13 @@
     }
     // save the note being left without making the user wait; a failure brings up a retry dialog
     saveInBackground() {
-      const doc = this.doc, ctx = this.ctx, entry = ctx.image;
+      const doc = this.doc, ctx = this.ctx, entry = (this.idx >= 0 && this.list[this.idx]) || ctx.image; // list item (may be an "편집한 노트" wrapper)
       this.dirty = false;
       const run = async () => {
         try {
           await App.library.save(doc, ctx);
           App.gallery.refreshEntry(ctx.image);
+          if (entry !== ctx.image) App.gallery.refreshEntry(entry);
         } catch (e) {
           const r = await App.handleError(e, `"${ctx.name}" 저장 실패`);
           if (r === 'retry') return run();

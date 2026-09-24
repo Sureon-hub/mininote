@@ -28,6 +28,7 @@
       this.bar.replaceChildren(
         this.btnUp, this.titleEl, h('div', { class: 'grow' }),
         U.iconBtn('download', '앱으로 설치', () => App.install(), 'install-only accent'),
+        U.iconBtn('image', '이미지 열기 — 어느 폴더의 이미지든 골라서 편집', e => App.openAnyImage(e.currentTarget)),
         U.iconBtn('refresh', '새로고침', () => this.reload()),
         U.iconBtn('grid', '보기', e => this.viewMenu(e.currentTarget)),
         U.iconBtn('sort', '정렬', e => this.sortMenu(e.currentTarget)),
@@ -51,7 +52,7 @@
     render(focusEntry) {
       const L = App.library, list = L.visible(), cur = L.current;
       this.titleEl.replaceChildren(
-        h('b', null, cur ? cur.name : '전체 노트'),
+        h('b', null, cur ? cur.name : L.filter === 'edited' ? '편집한 노트' : '전체 노트'),
         h('small', null, `${L.backend?.kind === 'drive' ? 'Google Drive' : L.backend?.kind === 'opfs' ? '앱 내부' : 'PC 폴더'} · ${list.length}장${cur ? '' : ` · 폴더 ${L.folders.length}개`}`));
       // folder chips: 전체 + each registered folder (+ add). Long-press / right-click a folder for options.
       const chip = (key, label, count, extra = '') => {
@@ -69,7 +70,7 @@
           },
         },
           h('span', null, label), count != null ? h('small', null, String(count)) : null);
-        if (key !== 'all') {
+        if (key !== 'all' && key !== 'edited') {
           let t = 0;
           b.addEventListener('pointerdown', e => { b.longPressed = false; t = setTimeout(() => { b.longPressed = true; this.folderMenu(key, e.clientX, e.clientY); }, 500); });
           ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => b.addEventListener(ev, () => clearTimeout(t)));
@@ -79,6 +80,7 @@
       };
       this.dirsEl.replaceChildren(
         chip('all', '전체', L.images.length),
+        chip('edited', '편집한 노트', L.projects.size),
         ...L.folders.map(f => chip(f.key, (f.error ? '⚠ ' : '') + f.name, f.count ?? 0, f.error ? ' err' : '')),
         h('button', { class: 'dir-chip add', title: '폴더 추가 — 다른 폴더의 이미지도 함께 보고 편집해요', onclick: () => App.addFolder(), html: App.icon('folderPlus') + '<span>폴더 추가</span>' }));
       this.io.disconnect();
@@ -92,6 +94,7 @@
         if (url) tile.append(h('img', { src: url, alt: '', draggable: 'false' }));
         else this.io.observe(tile);
         if (L.hasProject(entry)) tile.append(h('span', { class: 'badge', title: '편집파일 있음', html: App.icon('layers') }));
+        if (entry.missing) tile.classList.add('missing');
         frag.append(tile);
       });
       this.grid.replaceChildren(frag);
@@ -117,7 +120,10 @@
     }
 
     // ---------- thumbnails ----------
-    key(entry) { return App.library.backend.key + '|' + (entry.id || entry.path || entry.name) + '|' + entry.mtime; }
+    key(entry) {
+      if (entry.edited) return entry.entry ? this.key(entry.entry) : 'edited|' + entry.project.name + '|' + entry.project.mtime;
+      return App.library.backend.key + '|' + (entry.id || entry.path || (entry.rel && entry.rel.join('/')) || entry.name) + '|' + entry.mtime;
+    }
     thumbUrl(entry) { return this.urls.get(this.key(entry)); }
     enqueue(tile) { this.queue.push(tile); this.pump(); }
     pump() {
@@ -126,14 +132,32 @@
         const tile = this.queue.shift();
         if (!tile.isConnected) continue;
         this.running++;
-        this.loadThumb(tile.entry).then(url => {
+        this.loadThumb(tile.entry, tile).then(url => {
           if (url && tile.isConnected && !tile.querySelector('img')) tile.prepend(h('img', { src: url, alt: '', draggable: 'false' }));
         }).catch(e => {
           if (e && e.auth) App.needLogin(); else tile.classList.add('broken');
         }).finally(() => { this.running--; this.pump(); });
       }
     }
-    async loadThumb(entry) {
+    async loadThumb(entry, tile) {
+      if (entry.edited) {
+        // edited view: find the linked image (follows moves); if it's gone, draw the edit file itself
+        const real = await App.library.resolveEdited(entry, false);
+        if (real) return this.loadThumb(real);
+        tile?.classList.add('missing');
+        const k = this.key(entry);
+        if (this.urls.has(k)) return this.urls.get(k);
+        let blob = await U.idbGet('thumbs', k);
+        if (!blob) {
+          const { doc } = await App.project.decode(await App.library.backend.read(entry.project));
+          const flat = doc.flatten();
+          blob = await this.makeThumb(flat, flat.width, flat.height);
+          U.idbSet('thumbs', k, blob);
+        }
+        const url = URL.createObjectURL(blob);
+        this.urls.set(k, url);
+        return url;
+      }
       const k = this.key(entry);
       if (this.urls.has(k)) return this.urls.get(k);
       let blob = await U.idbGet('thumbs', k);
@@ -238,18 +262,28 @@
     }
     async tileMenu(tile, x, y) {
       const entry = tile.entry, L = App.library;
+      const proj = entry.edited ? entry.project : L.projectOf(entry);
       const v = await U.menu([
         { label: entry.name, value: null },
         '-',
         { label: '열기', value: 'open' },
-        { label: '이름 바꾸기', value: 'rename' },
+        { label: '이미지가 있는 폴더 열기', value: 'folder' },
+        !entry.edited && { label: '이름 바꾸기', value: 'rename' },
         { label: '정보', value: 'info' },
         '-',
-        { label: L.backend.trashToFolder ? '휴지통 폴더로 이동' : 'Drive 휴지통으로 이동', value: 'trash', danger: true },
+        proj && { label: '편집파일만 삭제 (원본 이미지는 그대로)', value: 'delproj', danger: true },
+        !entry.edited && { label: `이미지와 편집파일을 ${L.backend.trashToFolder ? '휴지통 폴더로' : 'Drive 휴지통으로'}`, value: 'trash', danger: true },
       ], x, y);
       try {
         if (v === 'open') { const list = L.visible(); App.editor.open(list, list.indexOf(entry)); }
-        else if (v === 'rename') {
+        else if (v === 'folder') App.openFolderOf(entry);
+        else if (v === 'delproj') {
+          const ok = await U.dialog({ title: '편집파일만 삭제할까요?', body: `"${entry.name}"의 레이어 편집 기록만 지워요. 원본 이미지는 그대로 남아요.`, buttons: [{ label: '취소', value: false }, { label: '편집파일 삭제', value: true, danger: true, primary: true }] });
+          if (ok) { await L.deleteProject(proj); this.render(); U.toast('편집파일을 지웠어요 (원본은 그대로)'); }
+        } else if (v === 'info' && entry.edited) {
+          const real = await L.resolveEdited(entry, true);
+          U.dialog({ title: entry.name, body: `원본: ${real ? (L.relOf(real) || [real.dir.name, real.name]).join(' / ') : '찾을 수 없음'}\n편집파일: ${entry.project.name}\n편집파일 저장: ${U.fmtDate(entry.project.mtime)}` });
+        } else if (v === 'rename') {
           const n = await U.dialog({ title: '이름 바꾸기', input: { value: U.baseName(entry.name) }, buttons: [{ label: '취소', value: null }, { label: '확인', value: true, primary: true }] });
           if (n) { await L.rename(entry, n); this.render(); }
         } else if (v === 'info') {

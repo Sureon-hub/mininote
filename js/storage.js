@@ -233,6 +233,58 @@
     }
     async remove(dir, entry) { await this.patchMeta(entry, { trashed: true }); }
     rename(dir, entry, newName) { return this.patchMeta(entry, { name: newName }); }
+
+    // ---- locating files anywhere in My Drive (links from edit files to their images) ----
+    async rootId() {
+      if (!this._rootId) this._rootId = (await (await this.api(`${API}/files/root?fields=id`)).json()).id;
+      return this._rootId;
+    }
+    async meta(id) {
+      this._meta = this._meta || new Map();
+      if (this._meta.has(id)) return this._meta.get(id);
+      const j = await (await this.api(`${API}/files/${id}?fields=${FIELDS},parents,trashed&supportsAllDrives=true`)).json();
+      this._meta.set(id, j);
+      return j;
+    }
+    forget(id) { this._meta?.delete(id); }
+    // folder names from My Drive down to the folder `id` ([] = My Drive itself, null = not inside My Drive)
+    async pathFromRoot(id) {
+      const rid = await this.rootId(), names = [];
+      let cur = id;
+      for (let i = 0; i < 60; i++) {
+        if (cur === rid || cur === 'root') return names.reverse();
+        const j = await this.meta(cur);
+        if (!j.parents || !j.parents.length) return null;
+        names.push(j.name);
+        cur = j.parents[0];
+      }
+      return null;
+    }
+    // a file by id (still valid after the user moved it to another folder)
+    async fileById(id) {
+      this.forget(id);
+      const j = await this.meta(id).catch(() => null);
+      if (!j || j.trashed) return null;
+      const f = this.conv(j);
+      f.parentId = j.parents && j.parents[0];
+      return f;
+    }
+    async searchImages(name) {
+      const r = await this.query(`name='${this.esc(name)}' and trashed=false and mimeType contains 'image/'`);
+      return (await Promise.all(r.map(async x => {
+        const j = await this.meta(x.id).catch(() => null);
+        return j ? Object.assign(this.conv(x), { parentId: j.parents && j.parents[0] }) : null;
+      }))).filter(Boolean);
+    }
+    // folders + images of one folder, for the in-app file picker
+    async listForPicker(parentId) {
+      const all = await this.query(`'${parentId}' in parents and trashed=false and (mimeType='${FOLDER}' or mimeType contains 'image/')`);
+      const byName = (a, b) => a.name.localeCompare(b.name, 'ko', { numeric: true });
+      return {
+        folders: all.filter(f => f.mimeType === FOLDER).map(f => this.conv(f)).sort(byName),
+        images: all.filter(f => f.mimeType !== FOLDER && /\.(png|jpe?g|webp)$/i.test(f.name)).map(f => this.conv(f)).sort(byName),
+      };
+    }
   }
   App.DriveBackend = DriveBackend;
 })();
