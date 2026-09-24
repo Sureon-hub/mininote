@@ -85,31 +85,70 @@
         images > 0 && h('button', { class: 'btn small danger', title: '이미지와 편집파일을 휴지통으로', onclick: () => this.bulkDelete('trash') }, `휴지통${images !== n ? ` (${images})` : ''}`),
       ].filter(Boolean));
     }
+    // the original image of a note, when it lives in "미니수첩/새 노트" (made or brought in by the app) – such
+    // images can go together with their edit file
+    async newNoteImage(e) {
+      const L = App.library;
+      const real = e.edited ? await L.resolveEdited(e, false).catch(() => null) : e;
+      const rel = real && L.relOf(real);
+      return rel && rel.length === 3 && rel[0] === '미니수첩' && rel[1] === '새 노트' ? real : null;
+    }
+    // delete edit files; with `withImages`, originals in 새 노트 go to the trash too
+    async deleteEdits(items, withImages) {
+      const L = App.library;
+      let done = 0, failed = 0, imgs = 0;
+      for (const e of items) {
+        try {
+          const p = e.edited ? e.project : L.projectOf(e);
+          const img = withImages ? await this.newNoteImage(e) : null;
+          if (img) { await L.trash(img); imgs++; }
+          if (p && L.projects.has(p.name)) await L.deleteProject(L.projects.get(p.name));
+          done++;
+        } catch (err) { if (err.auth) { App.handleError(err); break; } failed++; console.warn(err); }
+      }
+      return { done, failed, imgs };
+    }
     async bulkDelete(mode) {
       const L = App.library, items = [...this.sel];
-      let targets, title, body;
       if (mode === 'proj') {
-        targets = items.map(e => (e.edited ? e.project : L.projectOf(e))).filter(Boolean);
-        title = `편집파일 ${targets.length}개를 삭제할까요?`;
-        body = '레이어 편집 기록만 지워요. 원본 이미지는 그대로 남아요.';
-      } else {
-        targets = items.filter(e => !e.edited);
-        title = `노트 ${targets.length}개를 휴지통으로 옮길까요?`;
-        body = `이미지와 편집파일을 ${L.backend.trashToFolder ? `각 폴더의 "${App.project.TRASH_DIR}" 폴더로` : 'Google Drive 휴지통으로'} 옮겨요.`;
+        const withProj = items.filter(e => (e.edited ? e.project : L.projectOf(e)));
+        if (!withProj.length) return;
+        this.setBusy(true);
+        const inNew = (await Promise.all(withProj.map(e => this.newNoteImage(e)))).filter(Boolean).length;
+        this.setBusy(false);
+        const v = await U.dialog({
+          title: `편집파일 ${withProj.length}개를 삭제할까요?`,
+          body: '레이어 편집 기록을 지워요.' + (inNew ? `\n그중 ${inNew}개는 원본 이미지가 "새 노트" 폴더에 있어요 (앱에서 만들거나 가져온 노트). 원본도 함께 지울 수 있어요.` : ' 원본 이미지는 그대로 남아요.'),
+          buttons: [{ label: '취소', value: null }, { label: inNew ? '편집파일만 삭제' : '편집파일 삭제', value: 'proj', danger: !inNew, primary: !inNew },
+            inNew && { label: `새 노트 원본 ${inNew}개도 함께 삭제`, value: 'both', danger: true, primary: true }].filter(Boolean),
+        });
+        if (!v) return;
+        this.setBusy(true);
+        const r = await this.deleteEdits(withProj, v === 'both');
+        this.setBusy(false);
+        this.exitSelect();
+        if (r.imgs) await this.reload(); else this.render();
+        U.toast(`편집파일 ${r.done}개를 지웠어요${r.imgs ? ` · 새 노트 원본 ${r.imgs}개는 휴지통으로` : ' (원본은 그대로)'}${r.failed ? ` · ${r.failed}개 실패` : ''}`);
+        return;
       }
+      const targets = items.filter(e => !e.edited);
       if (!targets.length) return;
-      const ok = await U.dialog({ title, body, buttons: [{ label: '취소', value: false }, { label: mode === 'proj' ? '편집파일 삭제' : '휴지통으로', value: true, danger: true, primary: true }] });
+      const ok = await U.dialog({
+        title: `노트 ${targets.length}개를 휴지통으로 옮길까요?`,
+        body: `이미지와 편집파일을 ${L.backend.trashToFolder ? `각 폴더의 "${App.project.TRASH_DIR}" 폴더로` : 'Google Drive 휴지통으로'} 옮겨요.`,
+        buttons: [{ label: '취소', value: false }, { label: '휴지통으로', value: true, danger: true, primary: true }],
+      });
       if (!ok) return;
       this.setBusy(true);
       let done = 0, failed = 0;
       for (const t of targets) {
-        try { if (mode === 'proj') await L.deleteProject(t); else await L.trash(t); done++; }
+        try { await L.trash(t); done++; }
         catch (e) { if (e.auth) { App.handleError(e); break; } failed++; console.warn(e); }
       }
       this.setBusy(false);
       this.exitSelect();
       this.render();
-      U.toast(`${done}개 ${mode === 'proj' ? '편집파일을 지웠어요 (원본은 그대로)' : '휴지통으로 옮겼어요'}${failed ? ` · ${failed}개 실패` : ''}`);
+      U.toast(`${done}개 휴지통으로 옮겼어요${failed ? ` · ${failed}개 실패` : ''}`);
     }
     bindKeys() {
       window.addEventListener('keydown', e => {
@@ -413,8 +452,18 @@
         else if (v === 'select') this.enterSelect(entry);
         else if (v === 'folder') App.openFolderOf(entry);
         else if (v === 'delproj') {
-          const ok = await U.dialog({ title: '편집파일만 삭제할까요?', body: `"${entry.name}"의 레이어 편집 기록만 지워요. 원본 이미지는 그대로 남아요.`, buttons: [{ label: '취소', value: false }, { label: '편집파일 삭제', value: true, danger: true, primary: true }] });
-          if (ok) { await L.deleteProject(proj); this.render(); U.toast('편집파일을 지웠어요 (원본은 그대로)'); }
+          const inNew = await this.newNoteImage(entry);
+          const v2 = await U.dialog({
+            title: '편집파일을 삭제할까요?',
+            body: `"${entry.name}"의 레이어 편집 기록을 지워요.` + (inNew ? '\n원본 이미지가 "새 노트" 폴더에 있어요 (앱에서 만들거나 가져온 노트). 원본도 함께 지울 수 있어요.' : ' 원본 이미지는 그대로 남아요.'),
+            buttons: [{ label: '취소', value: null }, { label: inNew ? '편집파일만 삭제' : '편집파일 삭제', value: 'proj', danger: !inNew, primary: !inNew },
+              inNew && { label: '원본 이미지도 함께 삭제', value: 'both', danger: true, primary: true }].filter(Boolean),
+          });
+          if (v2) {
+            const r = await this.deleteEdits([entry], v2 === 'both');
+            if (r.imgs) await this.reload(); else this.render();
+            U.toast(r.imgs ? '편집파일을 지우고 원본 이미지는 휴지통으로 옮겼어요' : '편집파일을 지웠어요 (원본은 그대로)');
+          }
         } else if (v === 'info' && entry.edited) {
           const real = await L.resolveEdited(entry, true);
           U.dialog({ title: entry.name, body: `원본: ${real ? (L.relOf(real) || [real.dir.name, real.name]).join(' / ') : '찾을 수 없음'}\n편집파일: ${entry.project.name}\n편집파일 저장: ${U.fmtDate(entry.project.mtime)}` });
