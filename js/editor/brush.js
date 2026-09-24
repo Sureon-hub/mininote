@@ -131,24 +131,11 @@
       this.dirty = null; this.pending = null; this.last = null; this.acc = 0;
       // textured brush: grain is fixed to the paper (cream-pencil look)
       this.grain = preset.grain > 0.01 ? App.brush.grainValues() : null;
-      // outline ("테두리"): a wider stamp in the outline colour, placed *behind* the layer's existing pixels
-      const O = preset.outline;
-      this.outline = !erase && O && O.on && O.width > 0 && !L.alphaLock ? O : null;
-      if (this.outline) {
-        const ob = ed.buffers('outline');
-        this.octx = ob.strokeCtx; this.obuf = ob.stroke; this.ombuf = ob.masked; this.omctx = ob.maskedCtx;
-        this.otip = tinted(O.color, U.lerp(preset.hardness, 0.92, O.smooth), preset.tip);
-        this.ograin = this.grain ? preset.grain * (1 - O.smooth) : 0;
-      }
       doc.preview = { layer: L, apply: (sc, r) => this.draw(sc, r) };
     }
     draw(c, r) {
       const w = r.x1 - r.x0, h = r.y1 - r.y0;
       c.globalAlpha = this.p.opacity;
-      if (this.outline) {
-        c.globalCompositeOperation = 'destination-over';
-        c.drawImage(this.ombuf, r.x0, r.y0, w, h, r.x0, r.y0, w, h);
-      }
       // blend 'multiply' = highlighter: dark writing underneath (on the same layer) stays readable
       c.globalCompositeOperation = this.erase ? 'destination-out' : this.L.alphaLock ? 'source-atop' : (this.p.blend || 'source-over');
       c.drawImage(this.mbuf, r.x0, r.y0, w, h, r.x0, r.y0, w, h);
@@ -175,11 +162,6 @@
       };
       this.bctx.globalAlpha = a;
       put(this.bctx, this.tip, d);
-      if (this.outline) {
-        d = s + this.outline.width * 2;
-        this.octx.globalAlpha = 1;
-        put(this.octx, this.otip, d);
-      }
       const e = this.square ? d * 0.71 : d / 2; // a rotated square reaches up to half its diagonal
       this.pending = U.rUnion(this.pending, { x0: x - e - 1, y0: y - e - 1, x1: x + e + 1, y1: y + e + 1 });
     }
@@ -232,7 +214,6 @@
       this.pending = null;
       if (!r) return;
       this.pass(this.buf, this.bctx, this.mctx, this.grain ? this.p.grain : 0, r);
-      if (this.outline) this.pass(this.obuf, this.octx, this.omctx, this.ograin, r);
       this.dirty = U.rUnion(this.dirty, r);
       this.ed.requestComposite(r);
     }
@@ -265,7 +246,6 @@
       const w = r.x1 - r.x0, h = r.y1 - r.y0;
       this.bctx.clearRect(r.x0, r.y0, w, h);
       this.mctx.clearRect(r.x0, r.y0, w, h);
-      if (this.outline) { this.octx.clearRect(r.x0, r.y0, w, h); this.omctx.clearRect(r.x0, r.y0, w, h); }
     }
   }
   App.Stroke = Stroke;

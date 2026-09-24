@@ -13,7 +13,12 @@
     ['picker', 'picker', '스포이트 (I / Alt)'],
     ['hand', 'hand', '손 도구 (H / Space)'],
   ];
-  const KEYS = { b: 'brush', e: 'eraser', g: 'fill', m: 'select', l: 'lasso', v: 'transform', i: 'picker', h: 'hand' };
+  // snap an angle (radians) to the nearest multiple of 90° when within `deg` degrees; result in (-π, π]
+  const snapAngle = (a, deg) => {
+    a = Math.atan2(Math.sin(a), Math.cos(a));
+    const q = Math.round(a / (Math.PI / 2)) * (Math.PI / 2);
+    return Math.abs(a - q) < deg * Math.PI / 180 ? Math.atan2(Math.sin(q), Math.cos(q)) : a;
+  };
   const sizeToPos = s => Math.pow((s - 1) / 399, 1 / 2.2);
   const posToSize = p => Math.max(1, Math.round(1 + 399 * Math.pow(p, 2.2)));
 
@@ -155,10 +160,7 @@
     renderOpts() {
       const S = App.settings, name = this.toolName, o = [];
       if (name === 'brush') {
-        o.push(h('div', { class: 'chips' }, ['pencil', 'pen', 'marker', 'air'].map(k => h('button', {
-          class: 'chip' + (S.currentBrush === k ? ' on' : ''),
-          onclick: () => { S.currentBrush = k; App.saveSettings(); this.onBrushChanged(); if (this.dockBody.contains(this.pBrush.el)) this.pBrush.render(); },
-        }, S.brushes[k].name))));
+        o.push(this.brushChips());
       } else if (name === 'fill') {
         o.push(App.ui.slider({ label: '허용치', min: 0, max: 128, step: 1, get: () => S.fill.tolerance, set: v => { S.fill.tolerance = v; } }),
           App.ui.seg({ options: [['layer', '현재 레이어'], ['all', '모든 레이어']], get: () => S.fill.sample, set: v => { S.fill.sample = v; } }),
@@ -179,6 +181,80 @@
       this.opts.replaceChildren(...o);
       this.opts.hidden = !o.length;
       this.renderCtxbar();
+    }
+    // ---------- brushes & favourites ----------
+    // built-in brushes first, then saved favourites (each favourite is a full brush preset + colour)
+    brushKeys() {
+      const S = App.settings;
+      return ['pencil', 'pen', 'marker', 'air', ...(S.favOrder || []).filter(k => S.brushes[k])];
+    }
+    selectBrush(k) {
+      const S = App.settings, B = S.brushes[k];
+      if (!B) return;
+      S.currentBrush = k;
+      if (B.fav && B.color) this.setColor(B.color, false);
+      App.saveSettings();
+      if (this.toolName !== 'brush') this.setTool('brush');
+      else this.onBrushChanged();
+      if (this.dockBody.contains(this.pBrush.el)) this.pBrush.render();
+    }
+    brushChips() {
+      const S = App.settings;
+      const chips = this.brushKeys().map((k, i) => {
+        const B = S.brushes[k];
+        const b = h('button', { class: 'chip' + (S.currentBrush === k ? ' on' : '') + (B.fav ? ' fav' : ''), title: `${B.name}${i < 9 ? ` (${i + 1})` : ''}`, onclick: () => { if (!b.longPressed) this.selectBrush(k); } },
+          B.fav && B.color ? h('i', { class: 'chip-dot', style: { background: B.color } }) : null, B.name);
+        if (B.fav) {
+          let t = 0;
+          b.addEventListener('pointerdown', e => { b.longPressed = false; t = setTimeout(() => { b.longPressed = true; this.favMenu(k, e.clientX, e.clientY); }, 500); });
+          ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => b.addEventListener(ev, () => clearTimeout(t)));
+          b.addEventListener('contextmenu', e => { e.preventDefault(); clearTimeout(t); this.favMenu(k, e.clientX, e.clientY); });
+        }
+        return b;
+      });
+      chips.push(h('button', { class: 'chip add', title: '지금 브러시 설정과 색을 즐겨찾기로 저장', onclick: () => this.addFavorite() }, '＋ 즐겨찾기'));
+      return h('div', { class: 'chips brush-chips' }, chips);
+    }
+    async addFavorite() {
+      const S = App.settings, cur = S.brushes[S.currentBrush];
+      const name = await U.dialog({
+        title: '브러시 즐겨찾기 추가', body: '지금 브러시 설정(크기·질감·필압 등)과 색이 함께 저장돼요.',
+        input: { value: `${cur.fav ? cur.name : cur.name + ' '}${cur.fav ? ' 2' : (S.favOrder || []).length + 1}` },
+        buttons: [{ label: '취소', value: null }, { label: '저장', value: true, primary: true }],
+      });
+      if (!name || !name.trim()) return;
+      const k = 'fav_' + U.uid();
+      S.brushes[k] = { ...JSON.parse(JSON.stringify(cur)), name: name.trim(), fav: true, base: cur.base || S.currentBrush, color: this.color };
+      S.favOrder = [...(S.favOrder || []), k];
+      this.selectBrush(k);
+      U.toast(`"${name.trim()}" 즐겨찾기에 추가했어요 (길게 누르면 편집)`);
+    }
+    async favMenu(k, x, y) {
+      const S = App.settings, B = S.brushes[k];
+      const v = await U.menu([
+        { label: B.name, value: null }, '-',
+        { label: '이름 바꾸기', value: 'rename' },
+        { label: '지금 색으로 바꾸기', value: 'color' },
+        { label: '앞으로 옮기기', value: 'left' },
+        { label: '뒤로 옮기기', value: 'right' },
+        { label: '삭제', value: 'del', danger: true },
+      ], x, y);
+      const order = S.favOrder || [], i = order.indexOf(k);
+      if (v === 'rename') {
+        const n = await U.dialog({ title: '이름 바꾸기', input: { value: B.name }, buttons: [{ label: '취소', value: null }, { label: '확인', value: true, primary: true }] });
+        if (n && n.trim()) B.name = n.trim();
+      } else if (v === 'color') B.color = this.color;
+      else if ((v === 'left' && i > 0) || (v === 'right' && i < order.length - 1)) {
+        const j = v === 'left' ? i - 1 : i + 1;
+        [order[i], order[j]] = [order[j], order[i]];
+      } else if (v === 'del') {
+        S.favOrder = order.filter(x2 => x2 !== k);
+        delete S.brushes[k];
+        if (S.currentBrush === k) S.currentBrush = 'pencil';
+      } else return;
+      App.saveSettings();
+      this.onBrushChanged();
+      if (this.dockBody.contains(this.pBrush.el)) this.pBrush.render();
     }
     renderCtxbar() {
       const sel = this.doc?.selection;
@@ -429,7 +505,7 @@
       this.struct(() => {
         const L = doc.createLayer(A.name + ' 복사');
         L.ctx.drawImage(A.canvas, 0, 0);
-        Object.assign(L, { visible: A.visible, opacity: A.opacity, blend: A.blend, alphaLock: A.alphaLock });
+        Object.assign(L, { visible: A.visible, opacity: A.opacity, blend: A.blend, alphaLock: A.alphaLock, border: { ...A.border } });
         doc.layers.splice(doc.layers.indexOf(A) + 1, 0, L);
         doc.active = L;
       });
@@ -460,10 +536,11 @@
       this.tools.transform.commit();
       const B = doc.layers[i - 1], r = U.rFull(doc.w, doc.h);
       const before = B.ctx.getImageData(0, 0, doc.w, doc.h);
+      if (A.border.on) doc.syncBorders(r);
       B.ctx.save();
       B.ctx.globalAlpha = A.opacity;
       B.ctx.globalCompositeOperation = A.blend;
-      B.ctx.drawImage(A.canvas, 0, 0);
+      B.ctx.drawImage(A.border.on ? doc.layerSource(A, r) : A.canvas, 0, 0); // bake A's border in
       B.ctx.restore();
       B.rev++;
       const pix = H.pixels(doc, B, r, before, rr => this.changed(rr));
@@ -488,8 +565,8 @@
       if (commit) {
         const b = this.propBefore, a = H.snap(this.doc);
         this.propBefore = null;
-        if (JSON.stringify(b.layers.map(o => [o.name, o.visible, o.opacity, o.blend, o.alphaLock])) !==
-          JSON.stringify(a.layers.map(o => [o.name, o.visible, o.opacity, o.blend, o.alphaLock]))) {
+        if (JSON.stringify(b.layers.map(o => [o.name, o.visible, o.opacity, o.blend, o.alphaLock, o.border])) !==
+          JSON.stringify(a.layers.map(o => [o.name, o.visible, o.opacity, o.blend, o.alphaLock, o.border]))) {
           this.pushHistory(H.struct(this.doc, b, a, () => { this.changed(null); this.pLayers.render(); }));
         }
         this.pLayers.render();
@@ -593,20 +670,53 @@
       const pad = this.isWide() ? 28 : 6;
       this.fitZ = Math.max(0.01, Math.min((cw - pad * 2) / this.doc.w, (ch - pad * 2) / this.doc.h));
       this.z = this.fitZ;
+      this.rot = 0;
       this.ox = (cw - this.doc.w * this.z) / 2;
       this.oy = (ch - this.doc.h * this.z) / 2;
+      this.updateRotBadge();
       this.requestRender();
     }
-    toDoc(sx, sy) { return [(sx - this.ox) / this.z, (sy - this.oy) / this.z]; }
-    toScreen(x, y) { return [x * this.z + this.ox, y * this.z + this.oy]; }
+    // view transform: screen = o + R(rot) · (doc · z)
+    toDoc(sx, sy) {
+      const dx = (sx - this.ox) / this.z, dy = (sy - this.oy) / this.z;
+      const c = Math.cos(this.rot || 0), s = Math.sin(this.rot || 0);
+      return [dx * c + dy * s, -dx * s + dy * c];
+    }
+    toScreen(x, y) {
+      const c = Math.cos(this.rot || 0), s = Math.sin(this.rot || 0);
+      return [this.ox + this.z * (x * c - y * s), this.oy + this.z * (x * s + y * c)];
+    }
+    // place doc point (dx,dy) at screen (sx,sy) with the current zoom / rotation
+    pin(dx, dy, sx, sy) {
+      const c = Math.cos(this.rot || 0), s = Math.sin(this.rot || 0);
+      this.ox = sx - this.z * (dx * c - dy * s);
+      this.oy = sy - this.z * (dx * s + dy * c);
+    }
     zoomAt(sx, sy, f) {
       const [dx, dy] = this.toDoc(sx, sy);
       this.z = U.clamp(this.z * f, Math.min(0.05, this.fitZ), 32);
-      this.ox = sx - dx * this.z; this.oy = sy - dy * this.z;
+      this.pin(dx, dy, sx, sy);
       this.requestRender();
     }
+    rotateBy(deg, sx = this.stage.clientWidth / 2, sy = this.stage.clientHeight / 2) {
+      const [dx, dy] = this.toDoc(sx, sy);
+      this.rot = snapAngle((this.rot || 0) + deg * Math.PI / 180, 0.5);
+      this.pin(dx, dy, sx, sy);
+      this.updateRotBadge();
+      this.requestRender();
+    }
+    resetRotation() { this.rotateBy(-(this.rot || 0) * 180 / Math.PI); }
+    updateRotBadge() {
+      if (!this.rotBadge) {
+        this.rotBadge = h('button', { class: 'rot-badge', title: '회전 초기화', onclick: () => this.resetRotation() });
+        this.stage.append(this.rotBadge);
+      }
+      const deg = Math.round(((this.rot || 0) * 180 / Math.PI) % 360);
+      this.rotBadge.hidden = !deg;
+      this.rotBadge.textContent = `↻ ${deg}°`;
+    }
     panBy(dx, dy) { this.ox += dx; this.oy += dy; this.requestRender(); }
-    isFitView() { return this.z <= this.fitZ * 1.08; }
+    isFitView() { return this.z <= this.fitZ * 1.08 && !this.rot; }
 
     requestComposite(r) {
       if (r === null) this.compAll = true; else this.compRect = U.rUnion(this.compRect, r);
@@ -636,14 +746,14 @@
       else if (this.compRect) doc.renderComposite(this.compRect);
       this.compAll = false; this.compRect = null;
 
-      const z = this.z * dpr, x = this.ox * dpr, y = this.oy * dpr, w = doc.w * z, hh = doc.h * z;
-      // cheap page edge (shadowBlur is costly on phones at high DPR and this runs every frame)
-      c.fillStyle = 'rgba(0,0,0,.22)';
-      c.fillRect(x - dpr, y - dpr, w + 2 * dpr, hh + 3 * dpr);
+      const z = this.z * dpr, cs = Math.cos(this.rot || 0) * z, sn = Math.sin(this.rot || 0) * z;
       c.save();
-      c.beginPath(); c.rect(x, y, w, hh); c.clip();
-      c.fillStyle = this.checker(); c.fillRect(x, y, w, hh);
-      c.setTransform(z, 0, 0, z, x, y);
+      c.setTransform(cs, sn, -sn, cs, this.ox * dpr, this.oy * dpr);
+      // cheap page edge (shadowBlur is costly on phones at high DPR and this runs every frame)
+      const e = 1 / this.z;
+      c.fillStyle = 'rgba(0,0,0,.22)';
+      c.fillRect(-e, -e, doc.w + 2 * e, doc.h + 3 * e);
+      c.fillStyle = this.checker(); c.fillRect(0, 0, doc.w, doc.h);
       c.imageSmoothingEnabled = this.z < 2;
       c.imageSmoothingQuality = 'high';
       c.drawImage(doc.composite, 0, 0);
@@ -825,8 +935,13 @@
       const ts = [...this.pointers.values()].filter(p => p.type === 'touch');
       if (ts.length < 2) return null;
       const [a, b] = ts;
-      return { cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) || 1, z: this.z, ox: this.ox, oy: this.oy };
+      const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+      return {
+        cx, cy, d: Math.hypot(a.x - b.x, a.y - b.y) || 1, ang: Math.atan2(b.y - a.y, b.x - a.x),
+        z: this.z, rot: this.rot || 0, docPt: this.toDoc(cx, cy),
+      };
     }
+    // two fingers: pan + pinch zoom + rotate (rotation kicks in after a small twist, and snaps to 90° steps)
     updateGesture() {
       const g = this.gesture, B = g.base;
       if (!B) { g.base = this.gestureBase(); return; }
@@ -834,9 +949,13 @@
       if (ts.length < 2) return;
       const [a, b] = ts;
       const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2, d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
-      const z = U.clamp(B.z * d / B.d, Math.min(0.05, this.fitZ), 32);
-      const dx = (B.cx - B.ox) / B.z, dy = (B.cy - B.oy) / B.z;
-      this.z = z; this.ox = cx - dx * z; this.oy = cy - dy * z;
+      let da = Math.atan2(b.y - a.y, b.x - a.x) - B.ang;
+      da = Math.atan2(Math.sin(da), Math.cos(da));
+      if (!g.rotating && Math.abs(da) > 0.14) { g.rotating = true; g.moved = true; }
+      this.z = U.clamp(B.z * d / B.d, Math.min(0.05, this.fitZ), 32);
+      if (g.rotating) this.rot = snapAngle(B.rot + da, 5);
+      this.pin(B.docPt[0], B.docPt[1], cx, cy);
+      this.updateRotBadge();
       this.requestRender();
     }
     swipeMove(a, pt) {
@@ -877,41 +996,43 @@
       if (!this.visible || !this.doc) return;
       if (e.target.matches && e.target.matches('input,textarea,select')) return;
       if (document.querySelector('.modal-back, .menu-back')) return;
-      const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
       const t = this.tools.transform;
       const stop = () => { e.preventDefault(); e.stopPropagation(); };
-      if (mod) {
-        if (k === 'z') { stop(); e.shiftKey ? this.redo() : this.undo(); }
-        else if (k === 'y') { stop(); this.redo(); }
-        else if (k === 's') { stop(); this.save(); }
-        else if (k === 'a') { stop(); this.selectAll(); }
-        else if (k === 'd') { stop(); this.setSelection(null); }
-        else if (k === 'i' && e.shiftKey) { stop(); this.invertSelection(); }
-        else if (k === 'c') { stop(); this.copy(false); }
-        else if (k === 'x') { stop(); this.copy(true); }
-        else if (k === 't') { stop(); this.setTool('transform'); }
-        else if (k === '0') { stop(); this.fit(); }
-        else if (k === '=' || k === '+') { stop(); this.zoomAt(this.stage.clientWidth / 2, this.stage.clientHeight / 2, 1.25); }
-        else if (k === '-') { stop(); this.zoomAt(this.stage.clientWidth / 2, this.stage.clientHeight / 2, 0.8); }
+      const combo = App.keys.comboOf(e);
+      // fixed keys
+      if (combo === 'space') { stop(); if (!this.spaceDown) { this.spaceDown = true; this.canvas.style.cursor = 'grab'; } return; }
+      if (combo === 'enter' && t.active) { stop(); t.commit(); return; }
+      if (combo === 'escape') {
+        if (t.active) { stop(); t.revert(); } else if (this.doc.selection) { stop(); this.setSelection(null); }
         return;
       }
-      if (e.code === 'Space') { stop(); if (!this.spaceDown) { this.spaceDown = true; this.canvas.style.cursor = 'grab'; } return; }
-      if (KEYS[k] && !e.altKey) { stop(); this.setTool(KEYS[k]); return; }
-      if (k === '[' || k === ']') {
-        const p = this.preset();
-        p.size = posToSize(U.clamp(sizeToPos(p.size) + (k === ']' ? 0.04 : -0.04), 0, 1));
-        this.onBrushChanged(); App.saveSettings();
-        return;
-      }
-      if (k === 'enter' && t.active) { stop(); t.commit(); return; }
-      if (k === 'escape') {
-        if (t.active) { stop(); t.revert(); }
-        else if (this.doc.selection) { stop(); this.setSelection(null); }
-        return;
-      }
-      if ((k === 'delete' || k === 'backspace') && !t.active) { stop(); this.clearLayer(); return; }
-      if (k === 'arrowleft' && !t.active) { stop(); this.navigate(-1); }
-      if (k === 'arrowright' && !t.active) { stop(); this.navigate(1); }
+      // user-configurable keys (설정 → 단축키)
+      const act = App.keys.actionFor(combo);
+      if (!act) return;
+      stop();
+      this.runAction(act);
+    }
+    runAction(id) {
+      const t = this.tools.transform, cx = this.stage.clientWidth / 2, cy = this.stage.clientHeight / 2;
+      if (id.startsWith('tool.')) return this.setTool(id.slice(5));
+      if (id.startsWith('brush.fav')) { const k = this.brushKeys()[Number(id.slice(9)) - 1]; if (k) this.selectBrush(k); return; }
+      const size = d => { const p = this.preset(); p.size = posToSize(U.clamp(sizeToPos(p.size) + d, 0, 1)); this.onBrushChanged(); App.saveSettings(); };
+      const A = {
+        undo: () => this.undo(), redo: () => this.redo(), save: () => this.save(),
+        'layer.new': () => this.addLayer(), 'layer.dup': () => this.duplicateLayer(), 'layer.del': () => this.deleteLayer(),
+        'layer.up': () => this.moveLayer(1), 'layer.down': () => this.moveLayer(-1), 'layer.merge': () => this.mergeDown(),
+        'layer.selUp': () => { const L = this.doc.layers; const i = L.indexOf(this.doc.active); if (i < L.length - 1) this.selectLayer(L[i + 1]); },
+        'layer.selDown': () => { const L = this.doc.layers; const i = L.indexOf(this.doc.active); if (i > 0) this.selectLayer(L[i - 1]); },
+        'view.zoomIn': () => this.zoomAt(cx, cy, 1.25), 'view.zoomOut': () => this.zoomAt(cx, cy, 0.8),
+        'view.fit': () => this.fit(), 'view.actual': () => this.zoomAt(cx, cy, 1 / this.z),
+        'view.rotL': () => this.rotateBy(-15), 'view.rotR': () => this.rotateBy(15), 'view.rotReset': () => this.resetRotation(),
+        'brush.smaller': () => size(-0.04), 'brush.bigger': () => size(0.04),
+        'sel.all': () => this.selectAll(), 'sel.none': () => this.setSelection(null), 'sel.invert': () => this.invertSelection(),
+        'edit.copy': () => this.copy(false), 'edit.cut': () => this.copy(true), 'edit.clear': () => { if (!t.active) this.clearLayer(); },
+        'note.prev': () => { if (!t.active) this.navigate(-1); }, 'note.next': () => { if (!t.active) this.navigate(1); },
+        'panel.layers': () => this.toggleTab('layers'), 'panel.brush': () => this.toggleTab('brush'), 'panel.color': () => this.toggleTab('color'),
+      };
+      A[id]?.();
     }
   }
 

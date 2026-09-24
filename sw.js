@@ -1,9 +1,9 @@
 // Offline cache for the app shell. Bump VERSION when files change.
-const VERSION = 'mininote-v0.3.4';
+const VERSION = 'mininote-v0.4.0';
 const FILES = [
   './', 'index.html', 'css/app.css', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png',
   'js/util.js', 'js/storage.js', 'js/editor/doc.js', 'js/editor/brush.js', 'js/editor/tools.js',
-  'js/editor/panels.js', 'js/editor/editor.js', 'js/project.js', 'js/gallery.js', 'js/app.js',
+  'js/editor/panels.js', 'js/editor/keys.js', 'js/editor/editor.js', 'js/project.js', 'js/gallery.js', 'js/app.js',
 ];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));

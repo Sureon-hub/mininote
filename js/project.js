@@ -20,7 +20,7 @@
       const blobs = await Promise.all(doc.layers.map(L => U.canvasToBlob(L.canvas, 'image/png')));
       let off = 0;
       const layers = doc.layers.map((L, i) => {
-        const m = { name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend, alphaLock: L.alphaLock, offset: off, length: blobs[i].size };
+        const m = { name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend, alphaLock: L.alphaLock, border: L.border, offset: off, length: blobs[i].size };
         off += blobs[i].size;
         return m;
       });
@@ -41,6 +41,7 @@
       for (const m of header.layers) {
         const L = doc.createLayer(m.name);
         Object.assign(L, { visible: m.visible !== false, opacity: m.opacity ?? 1, blend: m.blend || 'source-over', alphaLock: !!m.alphaLock });
+        if (m.border) L.border = { ...L.border, ...m.border };
         if (m.length) {
           const bmp = await createImageBitmap(new Blob([new Uint8Array(buf, base + m.offset, m.length)], { type: 'image/png' }));
           L.ctx.drawImage(bmp, 0, 0);

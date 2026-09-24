@@ -265,8 +265,10 @@
       c.lineWidth = 1;
       c.beginPath();
       if (this.shape === 'rect') {
-        const p = ed.toScreen(this.a.x, this.a.y), q = ed.toScreen(this.b.x, this.b.y);
-        c.rect(Math.round(p[0]) + 0.5, Math.round(p[1]) + 0.5, Math.round(q[0] - p[0]), Math.round(q[1] - p[1]));
+        // doc-space rectangle (may appear rotated on screen when the view is rotated)
+        const { a, b } = this;
+        [[a.x, a.y], [b.x, a.y], [b.x, b.y], [a.x, b.y]].forEach(([x, y], i) => { const s = ed.toScreen(x, y); i ? c.lineTo(s[0], s[1]) : c.moveTo(s[0], s[1]); });
+        c.closePath();
       } else {
         this.pts.forEach(([x, y], i) => { const s = ed.toScreen(x, y); i ? c.lineTo(s[0], s[1]) : c.moveTo(s[0], s[1]); });
       }

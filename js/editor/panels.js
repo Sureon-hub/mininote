@@ -166,8 +166,7 @@
       const B = S.brushes[key];
       const kids = [];
       if (!erase) {
-        kids.push(h('div', { class: 'chips' }, ['pencil', 'pen', 'marker', 'air'].map(k =>
-          h('button', { class: 'chip' + (k === key ? ' on' : ''), onclick: () => { S.currentBrush = k; App.saveSettings(); this.render(); ed.onBrushChanged(); } }, S.brushes[k].name))));
+        kids.push(ed.brushChips());
       } else kids.push(h('div', { class: 'p-title' }, '지우개'));
       const pct = v => Math.round(v * 100) + '%';
       const sl = (label, prop, min, max, step, fmt) => ui.slider({ label, min, max, step, get: () => B[prop], set: v => { B[prop] = v; ed.onBrushChanged(); }, fmt });
@@ -186,25 +185,13 @@
         !erase && h('div', { class: 'row seg-row' }, h('span', { class: 'sl-label' }, '겹칠 때'),
           ui.seg({ options: [['source-over', '덮기'], ['multiply', '형광펜 (글씨 비침)']], get: () => B.blend || 'source-over', set: v => { B.blend = v; } })),
         ui.toggle({ label: '긋다가 멈추고 누르고 있으면 직선으로', get: () => !!B.holdLine, set: v => { B.holdLine = v; } }),
-        h('button', { class: 'btn small', onclick: () => { S.brushes[key] = JSON.parse(JSON.stringify(App.DEFAULTS.brushes[key])); App.saveSettings(); this.render(); ed.onBrushChanged(); } }, '이 브러시 초기화'));
+        h('button', { class: 'btn small', onclick: () => {
+          const base = App.DEFAULTS.brushes[B.fav ? B.base : key] || App.DEFAULTS.brushes.pencil;
+          S.brushes[key] = { ...JSON.parse(JSON.stringify(base)), ...(B.fav ? { name: B.name, fav: true, base: B.base, color: B.color } : {}) };
+          App.saveSettings(); this.render(); ed.onBrushChanged();
+        } }, B.fav ? '기본 브러시 설정으로 되돌리기' : '이 브러시 초기화'));
 
-      // outline (테두리)
-      if (!erase) {
-        const O = B.outline || (B.outline = JSON.parse(JSON.stringify(App.DEFAULTS.brushes[key].outline)));
-        const col = h('input', { type: 'color', value: O.color, class: 'ol-color' });
-        col.addEventListener('input', () => { O.color = col.value; });
-        col.addEventListener('change', () => App.saveSettings());
-        const box = h('div', { class: 'ol-box' + (O.on ? '' : ' off') },
-          h('div', { class: 'row ol-row' }, h('span', { class: 'sl-label' }, '테두리 색'), col,
-            ...['#ffffff', '#000000', '#fff6c8'].map(c => h('button', { class: 'sw ol-sw', style: { background: c }, title: c, onclick: () => { O.color = c; col.value = c; App.saveSettings(); } }))),
-          ui.slider({ label: '테두리 굵기', min: 1, max: 40, step: 1, get: () => O.width, set: v => { O.width = v; }, fmt: v => v + 'px' }),
-          ui.slider({ label: '매끈함', min: 0, max: 1, step: 0.01, get: () => O.smooth, set: v => { O.smooth = v; }, fmt: v => (v > 0.95 ? '매끈 ' : v < 0.05 ? '브러시처럼 ' : '') + pct(v) }));
-        kids.push(
-          h('div', { class: 'p-title' }, '테두리'),
-          ui.toggle({ label: '선 주위에 테두리 그리기', get: () => O.on, set: v => { O.on = v; box.classList.toggle('off', !v); } }),
-          box,
-          h('p', { class: 'hint' }, '테두리는 이미 그린 선 뒤로 들어가서, 선이 겹쳐도 앞의 글씨를 가리지 않아요. 이미지 위에 쓸 때는 이미지 레이어 위의 빈 레이어에 쓰세요 (이미지를 열면 자동으로 만들어져요).'));
-      }
+      if (!erase) kids.push(h('p', { class: 'hint' }, '테두리는 레이어 속성이에요: 레이어 탭 → 테두리.'));
 
       // pressure
       const P = S.pressure;
@@ -370,7 +357,7 @@
           h('button', { class: 'ib ly-eye', title: '보이기/숨기기', html: App.icon(L.visible ? 'eye' : 'eyeOff'), onclick: e => { e.stopPropagation(); ed.setLayerProp(L, 'visible', !L.visible, true); } }),
           this.thumb(L),
           h('div', { class: 'ly-name' }, h('b', null, L.name),
-            h('small', null, `${Math.round(L.opacity * 100)}% · ${(App.BLENDS.find(b => b[0] === L.blend) || [0, '표준'])[1]}${L.alphaLock ? ' · 🔒' : ''}`)),
+            h('small', null, `${Math.round(L.opacity * 100)}% · ${(App.BLENDS.find(b => b[0] === L.blend) || [0, '표준'])[1]}${L.alphaLock ? ' · 🔒' : ''}${L.border && L.border.on ? ' · 테두리' : ''}`)),
           h('span', { class: 'ly-grip', title: '끌어서 순서 바꾸기', html: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 9h14M5 15h14"/></svg>' }));
         row.addEventListener('click', () => { if (!this.suppressClick) ed.selectLayer(L); });
         row.addEventListener('dblclick', () => ed.renameLayer(L));
@@ -390,9 +377,34 @@
         h('div', { class: 'ly-row2' },
           h('label', { class: 'ly-blend' }, h('span', null, '합성'), blend),
           h('label', { class: 'tg compact', title: '투명 픽셀 잠금: 이미 칠해진 부분에만 그려집니다' }, h('span', null, '투명 잠금'), lock, h('i'))),
+        this.borderUI(A),
         h('div', { class: 'ly-row2' },
           h('button', { class: 'btn small', onclick: () => ed.renameLayer(A) }, '이름 변경'),
           h('button', { class: 'btn small', onclick: () => ed.clearLayer() }, '레이어 비우기')));
+    }
+    // layer border (경계 효과): outline around everything drawn on the layer
+    borderUI(A) {
+      const ed = this.ed, Bd = A.border;
+      const set = (patch, commit) => ed.setLayerProp(A, 'border', { ...A.border, ...patch }, commit);
+      const on = h('input', { type: 'checkbox', checked: Bd.on });
+      on.addEventListener('change', () => set({ on: on.checked }, true));
+      const col = h('input', { type: 'color', value: Bd.color, class: 'ol-color' });
+      col.addEventListener('input', () => set({ color: col.value }, false));
+      col.addEventListener('change', () => set({ color: col.value }, true));
+      const range = (label, prop, min, max, step, fmt) => {
+        const inp = h('input', { type: 'range', min, max, step, value: Bd[prop] });
+        const val = h('span', { class: 'sl-val' }, fmt(Bd[prop]));
+        inp.addEventListener('input', () => { set({ [prop]: Number(inp.value) }, false); val.textContent = fmt(Number(inp.value)); });
+        inp.addEventListener('change', () => set({ [prop]: Number(inp.value) }, true));
+        return h('label', { class: 'sl' }, h('span', { class: 'sl-label' }, label), inp, val);
+      };
+      return h('div', { class: 'ly-border' },
+        h('label', { class: 'tg compact' }, h('span', null, '테두리 (경계 효과)'), on, h('i')),
+        Bd.on && h('div', null,
+          h('div', { class: 'row ol-row' }, h('span', { class: 'sl-label' }, '색'), col,
+            ...['#ffffff', '#000000', '#fff6c8'].map(c => h('button', { class: 'sw ol-sw', style: { background: c }, title: c, onclick: () => set({ color: c }, true) }))),
+          range('굵기', 'width', 1, 40, 1, v => v + 'px'),
+          range('매끈함', 'smooth', 0, 1, 0.05, v => (v > 0.95 ? '매끈' : v < 0.05 ? '거칠게' : Math.round(v * 100) + '%'))));
     }
   }
   ui.LayersPanel = LayersPanel;

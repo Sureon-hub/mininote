@@ -21,9 +21,60 @@
       this.opacity = 1;
       this.blend = 'source-over';
       this.alphaLock = false;
+      // layer border effect (like CSP "경계 효과" / Photoshop "Stroke"): drawn behind everything on the layer
+      this.border = { on: false, color: '#ffffff', width: 4, smooth: 1 };
       this.rev = 0; // bumps when pixels change (for thumbnails)
     }
   }
+
+  // ---------- border effect helpers ----------
+  const INF = 1e20;
+  // exact squared Euclidean distance transform, 1-D pass (Felzenszwalb & Huttenlocher)
+  function edt1d(f, n, stride, off, d, v, z) {
+    let k = 0;
+    v[0] = 0; z[0] = -INF; z[1] = INF;
+    for (let q = 1; q < n; q++) {
+      const fq = f[off + q * stride] + q * q;
+      let p = v[k], s = (fq - (f[off + p * stride] + p * p)) / (2 * (q - p));
+      while (s <= z[k]) { k--; p = v[k]; s = (fq - (f[off + p * stride] + p * p)) / (2 * (q - p)); }
+      k++; v[k] = q; z[k] = s; z[k + 1] = INF;
+    }
+    k = 0;
+    for (let q = 0; q < n; q++) {
+      while (z[k + 1] < q) k++;
+      const dq = q - v[k];
+      d[q] = dq * dq + f[off + v[k] * stride];
+    }
+    for (let q = 0; q < n; q++) f[off + q * stride] = d[q];
+  }
+  function edt2d(f, w, h) {
+    const n = Math.max(w, h);
+    const d = new Float64Array(n), v = new Int32Array(n), z = new Float64Array(n + 1);
+    for (let x = 0; x < w; x++) edt1d(f, h, w, x, d, v, z);
+    for (let y = 0; y < h; y++) edt1d(f, w, 1, y * w, d, v, z);
+  }
+  // separable box blur of a float field (radius k)
+  function boxBlur(a, w, h, k) {
+    const t = new Float32Array(a.length), o = new Float32Array(a.length), win = 2 * k + 1;
+    for (let y = 0; y < h; y++) {
+      let s = 0; const row = y * w;
+      for (let x = -k; x <= k; x++) s += a[row + U.clamp(x, 0, w - 1)];
+      for (let x = 0; x < w; x++) {
+        t[row + x] = s / win;
+        s += a[row + Math.min(w - 1, x + k + 1)] - a[row + Math.max(0, x - k)];
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      for (let y = -k; y <= k; y++) s += t[U.clamp(y, 0, h - 1) * w + x];
+      for (let y = 0; y < h; y++) {
+        o[y * w + x] = s / win;
+        s += t[Math.min(h - 1, y + k + 1) * w + x] - t[Math.max(0, y - k) * w + x];
+      }
+    }
+    return o;
+  }
+  const borderKey = b => `${b.color}|${b.width}|${b.smooth}`;
 
   class Doc {
     constructor(w, h) {
@@ -48,9 +99,76 @@
       return this._scratch;
     }
 
+    get scratch2() {
+      if (!this._scratch2) this._scratch2 = U.canvas(this.w, this.h);
+      return this._scratch2;
+    }
+
+    // Recompute a layer's border inside rect r (needs the layer's pixels up to `width` beyond r).
+    updateBorder(L, r) {
+      const B = L.border, W = this.w, H = this.h;
+      if (!L.bcanvas) { L.bcanvas = U.canvas(W, H); L.bctx = L.bcanvas.getContext('2d'); }
+      const wpx = Math.max(0.5, B.width);
+      const k = Math.round(B.smooth * Math.min(6, 1 + wpx * 0.35)); // smoothing blur radius
+      const pad = Math.ceil(wpx) + k + 2;
+      const S = U.rClamp({ x0: r.x0 - pad, y0: r.y0 - pad, x1: r.x1 + pad, y1: r.y1 + pad }, W, H);
+      if (!S) return;
+      const sw = S.x1 - S.x0, sh = S.y1 - S.y0, n = sw * sh;
+      const src = L.ctx.getImageData(S.x0, S.y0, sw, sh).data;
+      let a = new Float32Array(n);
+      for (let i = 0; i < n; i++) a[i] = src[i * 4 + 3] / 255;
+      if (k > 0) a = boxBlur(a, sw, sh, k);
+      const thr = k > 0 ? 0.12 : 0.06;
+      const f = new Float64Array(n);
+      for (let i = 0; i < n; i++) f[i] = a[i] > thr ? 0 : INF;
+      edt2d(f, sw, sh);
+      const rw = r.x1 - r.x0, rh = r.y1 - r.y0;
+      const out = new ImageData(rw, rh), o = out.data;
+      const [cr, cg, cb] = App.ui.hex2rgb(B.color);
+      for (let y = 0; y < rh; y++) {
+        const sy = y + r.y0 - S.y0;
+        for (let x = 0; x < rw; x++) {
+          const d = Math.sqrt(f[sy * sw + x + r.x0 - S.x0]);
+          let al = wpx + 0.5 - d;
+          if (al <= 0) continue;
+          if (al > 1) al = 1;
+          const j = (y * rw + x) * 4;
+          o[j] = cr; o[j + 1] = cg; o[j + 2] = cb; o[j + 3] = al * 255;
+        }
+      }
+      L.bctx.putImageData(out, r.x0, r.y0);
+    }
+    // bring border caches up to date; returns the (possibly enlarged) rect that must be recomposited
+    syncBorders(r) {
+      for (const L of this.layers) {
+        if (!L.border || !L.border.on) { L.bKey = null; continue; }
+        const key = borderKey(L.border);
+        if (L.bRev === L.rev && L.bKey === key) continue;
+        const full = L.bKey !== key || !L.bcanvas;
+        const g = Math.ceil(L.border.width) + 8;
+        const er = full ? U.rFull(this.w, this.h) : U.rClamp({ x0: r.x0 - g, y0: r.y0 - g, x1: r.x1 + g, y1: r.y1 + g }, this.w, this.h);
+        this.updateBorder(L, er);
+        L.bRev = L.rev; L.bKey = key;
+        r = U.rUnion(r, er);
+      }
+      return r;
+    }
+    // what a layer contributes: its pixels (+ live preview) with its border behind
+    layerSource(L, r) {
+      let src = L.canvas;
+      if (this.preview && this.preview.layer === L) src = this.applyPreview(L, r);
+      if (!(L.border && L.border.on && L.bcanvas)) return src;
+      const s = this.scratch2, c = s.getContext('2d');
+      const x = r.x0, y = r.y0, w = r.x1 - r.x0, h = r.y1 - r.y0;
+      c.clearRect(x, y, w, h);
+      c.drawImage(L.bcanvas, x, y, w, h, x, y, w, h);
+      c.drawImage(src, x, y, w, h, x, y, w, h);
+      return s;
+    }
     renderComposite(rect) {
-      const r = rect ? U.rClamp(rect, this.w, this.h, 1) : U.rFull(this.w, this.h);
+      let r = rect ? U.rClamp(rect, this.w, this.h, 1) : U.rFull(this.w, this.h);
       if (!r) return;
+      r = this.syncBorders(r);
       const x = r.x0, y = r.y0, w = r.x1 - r.x0, h = r.y1 - r.y0;
       const c = this.cctx;
       c.save();
@@ -59,8 +177,7 @@
       c.clearRect(x, y, w, h);
       for (const L of this.layers) {
         if (!L.visible) continue;
-        let src = L.canvas;
-        if (this.preview && this.preview.layer === L) src = this.applyPreview(L, r);
+        const src = this.layerSource(L, r);
         c.globalAlpha = L.opacity;
         c.globalCompositeOperation = L.blend;
         c.drawImage(src, x, y, w, h, x, y, w, h);
@@ -218,10 +335,10 @@
   };
   History.snap = doc => ({
     active: doc.active,
-    layers: doc.layers.map(L => ({ L, name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend, alphaLock: L.alphaLock })),
+    layers: doc.layers.map(L => ({ L, name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend, alphaLock: L.alphaLock, border: { ...L.border } })),
   });
   History.restore = (doc, s) => {
-    doc.layers = s.layers.map(o => { const { L, ...p } = o; Object.assign(L, p); return L; });
+    doc.layers = s.layers.map(o => { const { L, ...p } = o; Object.assign(L, p, { border: { ...p.border } }); return L; });
     doc.active = s.active;
   };
   History.struct = (doc, before, after, cb) => ({

@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.3.4';
+  App.VERSION = '0.4.0';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -242,6 +242,7 @@
         h('button', { class: 'btn small', onclick: () => { App.driveAuth.signOut(); U.toast('로그아웃했어요'); } }, 'Google 로그아웃')),
       h('h4', null, '기타'),
       h('div', { class: 'row' },
+        h('button', { class: 'btn small', onclick: () => App.keys.openDialog() }, '단축키 설정 (PC)'),
         h('button', { class: 'btn small', onclick: () => App.install() }, App.isInstalled() ? '앱으로 설치됨 ✓' : '앱으로 설치'),
         h('button', { class: 'btn small', onclick: async () => { await U.idbClear('thumbs'); App.gallery.urls.clear(); U.toast('썸네일 캐시를 비웠어요'); App.gallery.render(); } }, '썸네일 캐시 비우기')),
       h('p', { class: 'hint' }, `미니수첩 v${App.VERSION}`));
