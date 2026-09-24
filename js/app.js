@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.9.0';
+  App.VERSION = '0.9.1';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -256,7 +256,12 @@
   }
   // PC: pick the base folder (ideally 내 드라이브); 미니수첩/편집파일 and 미니수첩/새 노트 are created inside it
   async function pickLocal() {
-    const ok = await U.dialog({
+    const mobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
+    const ok = await U.dialog(mobile ? {
+      title: '휴대폰 안의 폴더 열기',
+      body: '휴대폰 저장공간의 폴더를 골라요(예: Pictures 안의 폴더). 그 안에 "미니수첩" 폴더를 만들어요.\n• PC와 연동되지 않아요 — PC와 함께 쓰려면 "Google Drive로 시작"을 쓰세요.\n• 저장공간 맨 위, Download 폴더는 안드로이드가 막아서 고를 수 없어요.',
+      buttons: [{ label: '취소', value: false }, { label: '폴더 고르기', value: true, primary: true }],
+    } : {
       title: 'PC에서 시작하기',
       body: '구글 드라이브 동기화 폴더의 "내 드라이브"를 골라주세요.\n그 안에 "미니수첩" 폴더를 만들어 새 노트와 편집파일을 깔끔하게 모아둬요. 폰(Google Drive)과도 같은 폴더를 쓰게 돼요.',
       buttons: [{ label: '취소', value: false }, { label: '폴더 고르기', value: true, primary: true }],
@@ -553,8 +558,14 @@
       b.querySelector('small').textContent = '내 드라이브 › 미니수첩';
       kids.push(b);
     }
-    if (window.showDirectoryPicker) kids.push(h('button', { class: 'home-btn', onclick: pickLocal, html: App.icon('folder') + '<span><b>PC에서 시작</b><small>"내 드라이브"(구글 드라이브 동기화 폴더)를 고르면 그 안에 미니수첩 폴더를 만들어요</small></span>' }));
-    kids.push(h('button', { class: 'home-btn', onclick: connectDrive, html: App.icon('cloud') + '<span><b>Google Drive로 시작</b><small>폰·태블릿에서는 이 방법을 쓰세요 (내 드라이브 › 미니수첩)</small></span>' }));
+    // phones/tablets: Google Drive first; their system folder picker can't show Drive and blocks top-level folders
+    const mobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
+    const driveBtn = h('button', { class: 'home-btn' + (mobile && prev !== 'drive' ? ' primary' : ''), onclick: connectDrive, html: App.icon('cloud') + `<span><b>Google Drive로 시작</b><small>${mobile ? '휴대폰은 이걸 누르세요 — PC와 같은 "내 드라이브 › 미니수첩"을 써요' : '폰·태블릿에서 쓰는 방법 (내 드라이브 › 미니수첩)'}</small></span>` });
+    const pcBtn = window.showDirectoryPicker && (mobile
+      ? h('button', { class: 'home-btn', onclick: pickLocal, html: App.icon('folder') + '<span><b>휴대폰 안의 폴더 열기 (고급)</b><small>구글 드라이브가 아닌 휴대폰 저장공간 폴더예요. PC와 연동되지 않고, 저장공간 맨 위·Download 폴더는 안드로이드가 막아요</small></span>' })
+      : h('button', { class: 'home-btn', onclick: pickLocal, html: App.icon('folder') + '<span><b>PC에서 시작</b><small>"내 드라이브"(구글 드라이브 동기화 폴더)를 고르면 그 안에 미니수첩 폴더를 만들어요</small></span>' }));
+    if (mobile) kids.push(driveBtn); else if (pcBtn) kids.push(pcBtn);
+    if (mobile) { if (pcBtn) kids.push(pcBtn); } else kids.push(driveBtn);
     if (navigator.storage && navigator.storage.getDirectory) kids.push(h('button', { class: 'home-btn', onclick: () => useOpfs().catch(e => App.handleError(e)), html: App.icon('image') + '<span><b>앱 내부 저장소로 체험</b><small>설정 없이 바로 테스트 (이 기기 브라우저 안에만 저장)</small></span>' }));
     if (!App.isInstalled()) kids.push(h('button', { class: 'home-btn', onclick: () => App.install(), html: App.icon('download') + '<span><b>앱으로 설치</b><small>홈 화면 아이콘으로 바로 열고, 인터넷 없이도 실행돼요</small></span>' }));
     el.replaceChildren(...kids);
