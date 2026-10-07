@@ -2,7 +2,7 @@
 // Boot, screens, storage source selection, settings, Google Drive folder picker.
 (() => {
   const U = App.util, h = U.h, S = App.settings;
-  App.VERSION = '0.9.19';
+  App.VERSION = '0.9.20';
 
   // ---------------- screens ----------------
   App.show = name => {
@@ -150,6 +150,12 @@
     if (baseH && (await permitted([baseH], interactive).catch(() => false))) root = { kind: 'dir', name: baseH.name, handle: baseH, path: '/r' };
     else if (baseH && !interactive) return false;
     const b = new App.LocalBackend(root ? baseH : hs[0], 'local');
+    // the base folder was used before but has no 미니수첩 folder any more (e.g. the Google Drive folder was
+    // moved / re-mirrored): don't build a new empty 미니수첩 there – ask for the new place instead
+    if (root && !(await b.findDir(root, APP_HOME, false).catch(() => null)) && (await U.idbGet('kv', 'localAppDir'))) {
+      App.baseMoved = baseH.name;
+      return false;
+    }
     let appDir, notesKey = null;
     if (root) {
       const st = await appStructure(b, root);
@@ -312,7 +318,46 @@
     if (S.source === 'drive') return useDrive();
     if (S.source === 'opfs') return useOpfs();
   }
-  // PC: pick the base folder (ideally 내 드라이브); 미니수첩/편집파일 and 미니수첩/새 노트 are created inside it
+  // PC wording: the folder on the PC that shows the same things as "내 드라이브" in Google Drive
+  const PC_BASE_HINT = '구글 드라이브 동기화 폴더의 맨 위 폴더(구글 드라이브의 "내 드라이브"와 같은 내용이 보이는 폴더, 예: G:\\구글드라이브 PC동기화폴더)';
+  // after a re-pick: the Explorer path setting follows when the new folder is the old one's parent
+  // (e.g. "G:\구글드라이브 PC동기화폴더\내 드라이브" → "G:\구글드라이브 PC동기화폴더")
+  function followBasePath(newName) {
+    const p = (S.basePath || '').replace(/[\\/]+$/, '');
+    if (!p) return;
+    const parent = p.replace(/[\\/][^\\/]*$/, '');
+    if (parent !== p && parent.split(/[\\/]/).pop() === newName) { S.basePath = parent; App.saveSettings(); }
+  }
+  // the base folder moved (see useLocal): pick the new one; folders that no longer exist are dropped
+  // (folders inside the base come back from the shared folder list)
+  async function relocateBase() {
+    try {
+      const hd = await showDirectoryPicker({ id: 'mininote-base', mode: 'readwrite' });
+      let home = null;
+      try { home = await hd.getDirectoryHandle(APP_HOME); } catch { /* not there */ }
+      if (!home) {
+        const go = await U.dialog({
+          title: `"${hd.name}" 안에 "미니수첩" 폴더가 없어요`,
+          body: '구글 드라이브의 "내 드라이브"와 같은 내용이 보이는 폴더를 골라야 기존 노트와 편집파일이 이어져요. 그래도 이 폴더로 할까요? (새 "미니수첩" 폴더가 만들어져요)',
+          buttons: [{ label: '다시 고르기', value: false }, { label: '이 폴더로', value: true, danger: true }],
+        });
+        if (!go) return relocateBase();
+      }
+      const alive = [];
+      for (const h of await localHandles()) {
+        try {
+          if ((await h.queryPermission({ mode: 'readwrite' })) === 'granted') await h.values().next();
+          alive.push(h);
+        } catch (e) { if (e.name !== 'NotFoundError') alive.push(h); }
+      }
+      await U.idbSet('kv', 'localFolders', alive);
+      await U.idbSet('kv', 'baseDir', hd);
+      followBasePath(hd.name);
+      App.baseMoved = null;
+      if (!(await useLocal(true))) U.toast('폴더 권한이 거부됐어요');
+    } catch (e) { if (e.name !== 'AbortError') App.handleError(e, '폴더를 열지 못했어요'); }
+  }
+  // PC: pick the base folder (the Drive-synced folder); 미니수첩/편집파일 and 미니수첩/새 노트 are created inside it
   async function pickLocal() {
     const mobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
     const ok = await U.dialog(mobile ? {
@@ -321,7 +366,7 @@
       buttons: [{ label: '취소', value: false }, { label: '폴더 고르기', value: true, primary: true }],
     } : {
       title: 'PC에서 시작하기',
-      body: '구글 드라이브 동기화 폴더의 "내 드라이브"를 골라주세요.\n그 안에 "미니수첩" 폴더를 만들어 새 노트와 편집파일을 깔끔하게 모아둬요. 폰(Google Drive)과도 같은 폴더를 쓰게 돼요.',
+      body: `${PC_BASE_HINT}를 골라주세요.\n그 안에 "미니수첩" 폴더를 만들어 새 노트와 편집파일을 깔끔하게 모아둬요. 폰(Google Drive)과도 같은 폴더를 쓰게 돼요.`,
       buttons: [{ label: '취소', value: false }, { label: '폴더 고르기', value: true, primary: true }],
     });
     if (!ok) return;
@@ -444,13 +489,14 @@
     if (S.source !== 'local') { U.toast(S.source === 'drive' ? 'Google Drive에서는 "내 드라이브"가 기준이에요' : '앱 내부 저장소는 기준 폴더를 바꿀 수 없어요'); return false; }
     const ok = await U.dialog({
       title: '기준 폴더 고르기',
-      body: '미니수첩이 이미지를 찾고 바꿀 수 있는 가장 바깥 폴더를 한 번만 골라주세요.\n추천: 구글 드라이브 동기화 폴더의 "내 드라이브" — 그러면 폰(Google Drive)과 경로가 똑같아서 편집파일 연결이 이어져요.',
+      body: `미니수첩이 이미지를 찾고 바꿀 수 있는 가장 바깥 폴더를 한 번만 골라주세요.\n추천: ${PC_BASE_HINT} — 그러면 폰(Google Drive)과 경로가 똑같아서 편집파일 연결이 이어져요.`,
       buttons: [{ label: '취소', value: false }, { label: '폴더 고르기', value: true, primary: true }],
     });
     if (!ok) return false;
     try {
       const hd = await showDirectoryPicker({ id: 'mininote-base', mode: 'readwrite' });
       await U.idbSet('kv', 'baseDir', hd);
+      followBasePath(hd.name);
       await reopen();
       U.toast(`기준 폴더: ${hd.name}`);
       return true;
@@ -538,7 +584,7 @@
         body: U.h('div', null,
           U.h('p', null, `1) 미니수첩 폴더의 "탐색기 연결 설치.bat"을 한 번 실행해 주세요. (웹앱은 보안상 탐색기를 직접 못 열어서, 작은 연결 프로그램이 필요해요)`),
           U.h('p', null, `2) 기준 폴더 "${L.root.name}"의 실제 경로를 적어주세요. 탐색기 주소창에서 복사하면 돼요.`)),
-        input: { value: S.basePath || '', placeholder: '예) G:\\구글드라이브 PC동기화폴더\\내 드라이브' },
+        input: { value: S.basePath || '', placeholder: '예) G:\\구글드라이브 PC동기화폴더' },
         buttons: [{ label: '취소', value: null }, { label: '저장하고 열기', value: true, primary: true }],
       });
       if (!path || !/^[A-Za-z]:\\/.test(path.trim())) { if (path) U.toast('C:\\ 처럼 드라이브 문자로 시작하는 경로를 적어주세요'); return; }
@@ -667,9 +713,15 @@
     if (prev === 'local') {
       const hs = await localHandles(), baseH = await U.idbGet('kv', 'baseDir');
       if (hs.length || baseH) {
-        resume = h('button', { class: 'home-btn primary', onclick: () => useLocal(true).then(ok => ok || U.toast('폴더 권한이 거부됐어요')), html: App.icon('folder') + '<span><b>미니수첩 열기</b><small></small></span>' });
+        resume = h('button', { class: 'home-btn primary', onclick: () => useLocal(true).then(ok => ok || (App.baseMoved ? App.showHome() : U.toast('폴더 권한이 거부됐어요'))), html: App.icon('folder') + '<span><b>미니수첩 열기</b><small></small></span>' });
         resume.querySelector('small').textContent = baseH ? `${baseH.name} › 미니수첩` : hs.map(x => x.name).join(', ');
         note = '브라우저 보안 때문에 다시 켜면 폴더 접근을 한 번 허용해야 해요.\n허용 창에 "방문할 때마다 허용"이 보이면 그걸 고르세요 — 다음부터는 이 화면 없이 바로 열려요.';
+        if (App.baseMoved) {
+          // the Google Drive folder moved: one re-pick (and permission) for the new place
+          resume = h('button', { class: 'home-btn primary', onclick: relocateBase, html: App.icon('folder') + '<span><b>새 위치의 폴더 고르기</b><small></small></span>' });
+          resume.querySelector('small').textContent = `지금까지 쓰던 "${App.baseMoved}" 안에 미니수첩 폴더가 없어요`;
+          note = `구글 드라이브 동기화 폴더의 위치가 바뀐 것 같아요.\n${PC_BASE_HINT}를 골라 접근을 허용해 주세요. 노트와 편집파일, 폴더 목록이 그대로 이어져요.`;
+        }
       }
     }
     if (prev === 'drive') {
@@ -693,7 +745,7 @@
     const driveBtn = h('button', { class: 'home-btn' + (mobile && prev !== 'drive' ? ' primary' : ''), onclick: connectDrive, html: App.icon('cloud') + `<span><b>Google Drive로 시작</b><small>${mobile ? '휴대폰은 이걸 누르세요 — PC와 같은 "내 드라이브 › 미니수첩"을 써요' : '폰·태블릿에서 쓰는 방법 (내 드라이브 › 미니수첩)'}</small></span>` });
     const pcBtn = window.showDirectoryPicker && (mobile
       ? h('button', { class: 'home-btn', onclick: pickLocal, html: App.icon('folder') + '<span><b>휴대폰 안의 폴더 열기 (고급)</b><small>구글 드라이브가 아닌 휴대폰 저장공간 폴더예요. PC와 연동되지 않고, 저장공간 맨 위·Download 폴더는 안드로이드가 막아요</small></span>' })
-      : h('button', { class: 'home-btn', onclick: pickLocal, html: App.icon('folder') + '<span><b>PC에서 시작</b><small>"내 드라이브"(구글 드라이브 동기화 폴더)를 고르면 그 안에 미니수첩 폴더를 만들어요</small></span>' }));
+      : h('button', { class: 'home-btn', onclick: pickLocal, html: App.icon('folder') + '<span><b>PC에서 시작</b><small>구글 드라이브 동기화 폴더(예: G:\\구글드라이브 PC동기화폴더)를 고르면 그 안에 미니수첩 폴더를 만들어요</small></span>' }));
     if (mobile) kids.push(driveBtn); else if (pcBtn) kids.push(pcBtn);
     if (mobile) { if (pcBtn) kids.push(pcBtn); } else kids.push(driveBtn);
     if (navigator.storage && navigator.storage.getDirectory) kids.push(h('button', { class: 'home-btn', onclick: () => useOpfs().catch(e => App.handleError(e)), html: App.icon('image') + '<span><b>앱 내부 저장소로 체험</b><small>설정 없이 바로 테스트 (이 기기 브라우저 안에만 저장)</small></span>' }));
@@ -717,7 +769,7 @@
 
     // PC only: the real path of the base folder, used to open Explorer at an image (see "탐색기 연결 설치.bat")
     const basePathRow = () => {
-      const inp = h('input', { class: 'field', value: S.basePath || '', placeholder: '예) G:\\구글드라이브 PC동기화폴더\\내 드라이브' });
+      const inp = h('input', { class: 'field', value: S.basePath || '', placeholder: '예) G:\\구글드라이브 PC동기화폴더' });
       inp.addEventListener('change', () => { S.basePath = inp.value.trim(); S.explorerHelper = !!S.basePath; App.saveSettings(); });
       return h('label', { class: 'fieldrow' }, h('span', null, '기준 폴더의 실제 경로 (탐색기로 열기용)'), inp);
     };
@@ -732,7 +784,7 @@
       h('div', { class: 'row' }, h('span', null, `기준 폴더: ${App.library.root ? App.library.root.name : '없음 (이미지 열기·편집한 노트에 필요)'}`),
         S.source === 'local' && h('button', { class: 'btn small', onclick: () => { back.remove(); App.setBaseFolder(); } }, App.library.root ? '변경' : '정하기')),
       S.source === 'local' && basePathRow(),
-      h('p', { class: 'hint' }, '기준 폴더 아래의 이미지는 "이미지 열기"로 어디서든 열 수 있고, 편집파일이 원본 위치를 기억해요. 원본을 다른 폴더로 옮겨도 다시 찾아서 연결을 고쳐요. PC는 "내 드라이브"(구글 드라이브 동기화 폴더)를 고르면 폰과 경로가 같아져요.'),
+      h('p', { class: 'hint' }, '기준 폴더 아래의 이미지는 "이미지 열기"로 어디서든 열 수 있고, 편집파일이 원본 위치를 기억해요. 원본을 다른 폴더로 옮겨도 다시 찾아서 연결을 고쳐요. PC는 구글 드라이브 동기화 폴더의 맨 위(구글 드라이브의 "내 드라이브"와 같은 내용이 보이는 폴더)를 고르면 폰과 경로가 같아져요.'),
       h('p', { class: 'hint' }, '여러 폴더의 이미지를 함께 보고 편집할 수 있어요. 저장하면 원본 이미지는 원래 폴더에서 바뀌고, 레이어가 살아있는 편집파일은 모두 앱 폴더 한 곳에 모여요. PC와 폰에서 같은 앱 폴더를 쓰면 편집파일도 함께 이어져요.'),
       h('p', { class: 'hint' }, `기기 간 연동: 브러시 설정·즐겨찾기·최근 색·글꼴 설정은 앱 폴더의 "${App.sync.NAME}" 파일로 자동으로 맞춰져요. 필압·손가락 그리기·단축키·갤러리 보기는 기기마다 따로예요.`),
       h('h4', null, '그리기'),
